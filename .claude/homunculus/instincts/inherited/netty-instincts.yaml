@@ -1,0 +1,470 @@
+# Instincts generated from https://github.com/dyzmj/netty
+# Generated: 2026-04-01T08:48:38.197Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: netty-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Commit Length
+
+## Action
+
+Write moderate-length commit messages (~66 characters)
+
+## Evidence
+
+- Average commit message length: 66 chars
+- Based on 200 commits
+
+---
+id: netty-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Naming Files
+
+## Action
+
+Use PascalCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: PascalCase
+
+---
+id: netty-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: netty-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: netty-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: netty-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~8x per month
+- Files: **/*.test.*
+
+---
+id: netty-workflow-auto-port-fix-or-feature-to-4-1
+trigger: "when doing auto port fix or feature to 4 1"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Workflow Auto Port Fix Or Feature To 4 1
+
+## Action
+
+Follow the auto-port-fix-or-feature-to-4-1 workflow:
+1. Cherry-pick the relevant commit from the source branch.
+2. Apply changes to the same files in the 4.1 branch.
+3. Update or add corresponding test files if necessary.
+4. Commit with a message starting with 'Auto-port 4.1:' and referencing the original PR/commit.
+5. Co-author attribution if applicable.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~10x per month
+- Files: */src/main/java/**/*.java, */src/main/c/**/*.c, */src/test/java/**/*.java
+
+---
+id: netty-workflow-test-stabilization-or-diagnostic-improvement
+trigger: "when doing test stabilization or diagnostic improvement"
+confidence: 0.8
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Workflow Test Stabilization Or Diagnostic Improvement
+
+## Action
+
+Follow the test-stabilization-or-diagnostic-improvement workflow:
+1. Identify the problematic test method(s) in test files.
+2. Add synchronization primitives (e.g., barriers, latches) to coordinate threads.
+3. Increase or adjust timeouts.
+4. Capture and report stack traces or exceptions from worker threads.
+5. Sometimes add or adjust annotations (e.g., @Isolated) to control test isolation.
+6. Commit changes with a message referencing test stability or diagnostics.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~6x per month
+- Files: */src/test/java/**/*.java
+
+---
+id: netty-workflow-release-version-bump-and-pom-update
+trigger: "when doing release version bump and pom update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Workflow Release Version Bump And Pom Update
+
+## Action
+
+Follow the release-version-bump-and-pom-update workflow:
+1. Update the version number in all pom.xml files.
+2. Commit with a message indicating release preparation or next iteration.
+3. Affect all modules' pom.xml files in a single commit.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: **/pom.xml
+
+---
+id: netty-workflow-feature-or-bugfix-with-corresponding-tests
+trigger: "when doing feature or bugfix with corresponding tests"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/dyzmj/netty
+---
+
+# Netty Workflow Feature Or Bugfix With Corresponding Tests
+
+## Action
+
+Follow the feature-or-bugfix-with-corresponding-tests workflow:
+1. Modify or add implementation files (Java or C).
+2. Add or update test files in the corresponding test directory.
+3. Commit both implementation and test changes together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~8x per month
+- Files: */src/main/java/**/*.java, */src/main/c/**/*.c, */src/test/java/**/*.java
+
+---
+id: netty-instinct-class-naming
+trigger: "When creating a new Java class file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Class Naming
+
+## Action
+
+Name the file and class using PascalCase
+
+## Evidence
+
+- Pattern in files: buffer/src/main/java/io/netty/buffer/AdaptivePoolingAllocator.java
+- Naming convention: classes = PascalCase
+
+---
+id: netty-instinct-function-naming
+trigger: "When defining a function in Java"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in files: buffer/src/main/java/io/netty/buffer/AdaptivePoolingAllocator.java
+- Naming convention: functions = camelCase
+
+---
+id: netty-instinct-constant-naming
+trigger: "When defining a constant in Java"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in files: buffer/src/main/java/io/netty/buffer/AdaptivePoolingAllocator.java
+- Naming convention: constants = SCREAMING_SNAKE_CASE
+
+---
+id: netty-instinct-import-style
+trigger: "When importing Java classes"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Import style: relative
+- Pattern in files: buffer/src/main/java/io/netty/buffer/AdaptivePoolingAllocator.java
+
+---
+id: netty-instinct-export-style
+trigger: "When exporting classes or functions in Java"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Export Style
+
+## Action
+
+Use named exports (public class/function)
+
+## Evidence
+
+- Export style: named
+- Pattern in files: buffer/src/main/java/io/netty/buffer/AdaptivePoolingAllocator.java
+
+---
+id: netty-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Test Location
+
+## Action
+
+Place test files under the corresponding module's src/test/java directory
+
+## Evidence
+
+- Pattern in files: buffer/src/test/java/io/netty/buffer/PooledByteBufAllocatorTest.java
+
+---
+id: netty-instinct-test-type
+trigger: "When writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Test Type
+
+## Action
+
+Write unit tests for new features or bug fixes
+
+## Evidence
+
+- Testing pattern: unit
+- Pattern in files: buffer/src/test/java/io/netty/buffer/AbstractByteBufAllocatorTest.java
+
+---
+id: netty-instinct-test-stabilization
+trigger: "When a test is flaky or fails nondeterministically in CI"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Test Stabilization
+
+## Action
+
+Add synchronization primitives, adjust timeouts, or capture stack traces to improve stability and diagnostics
+
+## Evidence
+
+- Workflow: test-stabilization-or-diagnostic-improvement
+- Pattern in commits: Fix flaky PooledByteBufAllocatorTest (#16324)
+
+---
+id: netty-instinct-commit-format
+trigger: "When making a commit"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Commit Format
+
+## Action
+
+Format the commit message as '<scope>: <description> (#PR)' or 'Auto-port 4.1: <description> (#PR)' for auto-port commits
+
+## Evidence
+
+- Pattern in commits: fix: the precedence of + is higher than >> (#16312) (#16316)
+- Auto-port 4.1: Include user properties and subscription IDs in MqttProperties#isEmpty (#16582)
+
+---
+id: netty-instinct-auto-port-workflow
+trigger: "When a fix or feature is merged to a mainline branch and needs to be ported to the 4.1 branch"
+confidence: 0.98
+domain: workflow
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Auto Port Workflow
+
+## Action
+
+Cherry-pick the commit, apply changes to 4.1, update tests if needed, and commit with 'Auto-port 4.1:' prefix referencing the original PR/commit
+
+## Evidence
+
+- Workflow: auto-port-fix-or-feature-to-4-1
+- Pattern in commits: Auto-port 4.1: Avoid leak in PemReader on OutOfDirectMemoryError (#16576)
+
+---
+id: netty-instinct-release-bump
+trigger: "When preparing for a new release or next dev iteration"
+confidence: 0.99
+domain: workflow
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Release Bump
+
+## Action
+
+Update version numbers in all pom.xml files and commit with a message indicating release preparation
+
+## Evidence
+
+- Workflow: release-version-bump-and-pom-update
+- Pattern in files: **/pom.xml
+
+---
+id: netty-instinct-feature-with-tests
+trigger: "When implementing a new feature or bugfix"
+confidence: 0.92
+domain: workflow
+source: repo-analysis
+source_repo: dyzmj/netty
+---
+
+# Netty Instinct Feature With Tests
+
+## Action
+
+Modify/add implementation files and add/update corresponding test files in the same commit
+
+## Evidence
+
+- Workflow: feature-or-bugfix-with-corresponding-tests
+- Pattern in commits: AdaptiveByteBufAllocator: make sure byteBuf.capacity() not greater th… (#16320)
+
