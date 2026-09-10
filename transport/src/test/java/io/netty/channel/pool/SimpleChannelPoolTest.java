@@ -26,16 +26,15 @@ import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.util.concurrent.Future;
-import org.hamcrest.CoreMatchers;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.util.Queue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.netty.channel.pool.ChannelPoolTestUtils.getLocalAddrId;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -201,6 +200,66 @@ public class SimpleChannelPoolTest {
         group.shutdownGracefully();
     }
 
+    @Test
+    public void testActiveUnhealthyChannelIsClosedOnRelease() throws Exception {
+        EventLoopGroup group = new DefaultEventLoopGroup();
+        LocalAddress addr = new LocalAddress(getLocalAddrId());
+        ServerBootstrap sb = new ServerBootstrap()
+                .group(group)
+                .channel(LocalServerChannel.class)
+                .childHandler(new ChannelInboundHandlerAdapter());
+        Channel sc = sb.bind(addr).syncUninterruptibly().channel();
+
+        final AtomicBoolean channelReleased = new AtomicBoolean();
+        ChannelPoolHandler handler = new ChannelPoolHandler() {
+            @Override
+            public void channelReleased(Channel ch) {
+                assertTrue(ch.isActive());
+                channelReleased.set(true);
+            }
+
+            @Override
+            public void channelAcquired(Channel ch) {
+                // NOOP
+            }
+
+            @Override
+            public void channelCreated(Channel ch) {
+                // NOOP
+            }
+        };
+        Bootstrap cb = new Bootstrap()
+                .group(group)
+                .channel(LocalChannel.class)
+                .remoteAddress(addr);
+        ChannelHealthChecker healthChecker = new ChannelHealthChecker() {
+            @Override
+            public Future<Boolean> isHealthy(Channel channel) {
+                return channel.eventLoop().newSucceededFuture(Boolean.FALSE);
+            }
+        };
+        SimpleChannelPool pool = new SimpleChannelPool(cb, handler, healthChecker);
+        Channel channel = null;
+        try {
+            channel = pool.acquire().syncUninterruptibly().getNow();
+            assertTrue(channel.isActive());
+
+            Future<Void> releaseFuture = pool.release(channel).syncUninterruptibly();
+
+            assertTrue(releaseFuture.isSuccess());
+            assertTrue(channelReleased.get());
+            assertTrue(channel.closeFuture().awaitUninterruptibly(1, TimeUnit.SECONDS));
+            assertFalse(channel.isActive());
+        } finally {
+            if (channel != null) {
+                channel.close().syncUninterruptibly();
+            }
+            pool.close();
+            sc.close().syncUninterruptibly();
+            group.shutdownGracefully();
+        }
+    }
+
     /**
      * Tests that if channel was unhealthy it is was offered back to the pool because
      * it was requested not to validate channel health on release.
@@ -234,7 +293,7 @@ public class SimpleChannelPoolTest {
         channel1.close().syncUninterruptibly();
         Future<Void> releaseFuture =
                 pool.release(channel1, channel1.eventLoop().<Void>newPromise()).syncUninterruptibly();
-        assertThat(releaseFuture.isSuccess(), CoreMatchers.is(true));
+        assertTrue(releaseFuture.isSuccess());
 
         Channel channel2 = pool.acquire().syncUninterruptibly().getNow();
         //verifying that in fact the channel2 is different that means is not pulled from the pool

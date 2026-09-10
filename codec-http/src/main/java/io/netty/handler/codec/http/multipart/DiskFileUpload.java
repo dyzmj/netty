@@ -75,7 +75,7 @@ public class DiskFileUpload extends AbstractDiskHttpData implements FileUpload {
 
     @Override
     public void setFilename(String filename) {
-        this.filename = ObjectUtil.checkNotNull(filename, "filename");
+        this.filename = FileUploadUtil.validateFileNameForMultiPart(filename);
     }
 
     @Override
@@ -210,6 +210,7 @@ public class DiskFileUpload extends AbstractDiskHttpData implements FileUpload {
                 throw new ChannelException(e);
             }
         }
+        upload.setCompleted(isCompleted());
         return upload;
     }
 

@@ -19,6 +19,7 @@ package io.netty.handler.ssl;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.EmptyArrays;
+import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -41,11 +42,11 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-
 import javax.crypto.NoSuchPaddingException;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSessionContext;
 
 import static io.netty.handler.ssl.SslUtils.DEFAULT_CIPHER_SUITES;
@@ -69,33 +70,54 @@ public class JdkSslContext extends SslContext {
     private static final Provider DEFAULT_PROVIDER;
 
     static {
-        SSLContext context;
-        try {
-            context = SSLContext.getInstance(PROTOCOL);
-            context.init(null, null, null);
-        } catch (Exception e) {
-            throw new Error("failed to initialize the default SSL context", e);
-        }
+        Defaults defaults = new Defaults();
+        defaults.init();
 
-        DEFAULT_PROVIDER = context.getProvider();
-
-        SSLEngine engine = context.createSSLEngine();
-        DEFAULT_PROTOCOLS = defaultProtocols(context, engine);
-
-        SUPPORTED_CIPHERS = Collections.unmodifiableSet(supportedCiphers(engine));
-        DEFAULT_CIPHERS = Collections.unmodifiableList(defaultCiphers(engine, SUPPORTED_CIPHERS));
-
-        List<String> ciphersNonTLSv13 = new ArrayList<String>(DEFAULT_CIPHERS);
-        ciphersNonTLSv13.removeAll(Arrays.asList(SslUtils.DEFAULT_TLSV13_CIPHER_SUITES));
-        DEFAULT_CIPHERS_NON_TLSV13 = Collections.unmodifiableList(ciphersNonTLSv13);
-
-        Set<String> suppertedCiphersNonTLSv13 = new LinkedHashSet<String>(SUPPORTED_CIPHERS);
-        suppertedCiphersNonTLSv13.removeAll(Arrays.asList(SslUtils.DEFAULT_TLSV13_CIPHER_SUITES));
-        SUPPORTED_CIPHERS_NON_TLSV13 = Collections.unmodifiableSet(suppertedCiphersNonTLSv13);
+        DEFAULT_PROVIDER = defaults.defaultProvider;
+        DEFAULT_PROTOCOLS = defaults.defaultProtocols;
+        SUPPORTED_CIPHERS = defaults.supportedCiphers;
+        DEFAULT_CIPHERS = defaults.defaultCiphers;
+        DEFAULT_CIPHERS_NON_TLSV13 = defaults.defaultCiphersNonTLSv13;
+        SUPPORTED_CIPHERS_NON_TLSV13 = defaults.supportedCiphersNonTLSv13;
 
         if (logger.isDebugEnabled()) {
             logger.debug("Default protocols (JDK): {} ", Arrays.asList(DEFAULT_PROTOCOLS));
             logger.debug("Default cipher suites (JDK): {}", DEFAULT_CIPHERS);
+        }
+    }
+
+    private static final class Defaults {
+        String[] defaultProtocols;
+        List<String> defaultCiphers;
+        List<String> defaultCiphersNonTLSv13;
+        Set<String> supportedCiphers;
+        Set<String> supportedCiphersNonTLSv13;
+        Provider defaultProvider;
+
+        void init() {
+            SSLContext context;
+            try {
+                context = SSLContext.getInstance(PROTOCOL);
+                context.init(null, null, null);
+            } catch (Exception e) {
+                throw new Error("failed to initialize the default SSL context", e);
+            }
+
+            defaultProvider = context.getProvider();
+
+            SSLEngine engine = context.createSSLEngine();
+            defaultProtocols = defaultProtocols(context, engine);
+
+            supportedCiphers = Collections.unmodifiableSet(supportedCiphers(engine));
+            defaultCiphers = Collections.unmodifiableList(defaultCiphers(engine, supportedCiphers));
+
+            List<String> ciphersNonTLSv13 = new ArrayList<String>(defaultCiphers);
+            ciphersNonTLSv13.removeAll(Arrays.asList(SslUtils.DEFAULT_TLSV13_CIPHER_SUITES));
+            defaultCiphersNonTLSv13 = Collections.unmodifiableList(ciphersNonTLSv13);
+
+            Set<String> suppertedCiphersNonTLSv13 = new LinkedHashSet<String>(supportedCiphers);
+            suppertedCiphersNonTLSv13.removeAll(Arrays.asList(SslUtils.DEFAULT_TLSV13_CIPHER_SUITES));
+            supportedCiphersNonTLSv13 = Collections.unmodifiableSet(suppertedCiphersNonTLSv13);
         }
     }
 
@@ -169,6 +191,7 @@ public class JdkSslContext extends SslContext {
     private final ClientAuth clientAuth;
     private final SSLContext sslContext;
     private final boolean isClient;
+    private final String endpointIdentificationAlgorithm;
 
     /**
      * Creates a new {@link JdkSslContext} from a pre-configured {@link SSLContext}.
@@ -238,10 +261,18 @@ public class JdkSslContext extends SslContext {
     @SuppressWarnings("deprecation")
     JdkSslContext(SSLContext sslContext, boolean isClient, Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
                   JdkApplicationProtocolNegotiator apn, ClientAuth clientAuth, String[] protocols, boolean startTls) {
-        super(startTls);
+        this(sslContext, isClient, ciphers, cipherFilter, apn, clientAuth, protocols, startTls, null, null);
+    }
+
+    @SuppressWarnings("deprecation")
+    JdkSslContext(SSLContext sslContext, boolean isClient, Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
+                  JdkApplicationProtocolNegotiator apn, ClientAuth clientAuth, String[] protocols, boolean startTls,
+                  String endpointIdentificationAlgorithm, ResumptionController resumptionController) {
+        super(startTls, resumptionController);
         this.apn = checkNotNull(apn, "apn");
         this.clientAuth = checkNotNull(clientAuth, "clientAuth");
         this.sslContext = checkNotNull(sslContext, "sslContext");
+        this.endpointIdentificationAlgorithm = endpointIdentificationAlgorithm;
 
         final List<String> defaultCiphers;
         final Set<String> supportedCiphers;
@@ -345,12 +376,22 @@ public class JdkSslContext extends SslContext {
                     throw new Error("Unknown auth " + clientAuth);
             }
         }
+        configureEndpointVerification(engine);
         JdkApplicationProtocolNegotiator.SslEngineWrapperFactory factory = apn.wrapperFactory();
         if (factory instanceof JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) {
             return ((JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) factory)
                     .wrapSslEngine(engine, alloc, apn, isServer());
         }
         return factory.wrapSslEngine(engine, apn, isServer());
+    }
+
+    private void configureEndpointVerification(SSLEngine engine) {
+        int version = PlatformDependent.javaVersion();
+        if (version >= 7) {
+            SSLParameters params = engine.getSSLParameters();
+            Java7SslParametersUtils.setEndpointIdentificationAlgorithm(params, endpointIdentificationAlgorithm);
+            engine.setSSLParameters(params);
+        }
     }
 
     @Override

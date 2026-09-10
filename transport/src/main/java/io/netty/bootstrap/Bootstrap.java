@@ -23,9 +23,9 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.resolver.AddressResolver;
+import io.netty.resolver.AddressResolverGroup;
 import io.netty.resolver.DefaultAddressResolverGroup;
 import io.netty.resolver.NameResolver;
-import io.netty.resolver.AddressResolverGroup;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.internal.ObjectUtil;
@@ -35,6 +35,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.Collection;
 
 /**
  * A {@link Bootstrap} that makes it easy to bootstrap a {@link Channel} to use
@@ -47,20 +48,18 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Bootstrap.class);
 
-    private static final AddressResolverGroup<?> DEFAULT_RESOLVER = DefaultAddressResolverGroup.INSTANCE;
-
     private final BootstrapConfig config = new BootstrapConfig(this);
 
-    @SuppressWarnings("unchecked")
-    private volatile AddressResolverGroup<SocketAddress> resolver =
-            (AddressResolverGroup<SocketAddress>) DEFAULT_RESOLVER;
+    private ExternalAddressResolver externalResolver;
+    private volatile boolean disableResolver;
     private volatile SocketAddress remoteAddress;
 
     public Bootstrap() { }
 
     private Bootstrap(Bootstrap bootstrap) {
         super(bootstrap);
-        resolver = bootstrap.resolver;
+        externalResolver = bootstrap.externalResolver;
+        disableResolver = bootstrap.disableResolver;
         remoteAddress = bootstrap.remoteAddress;
     }
 
@@ -72,9 +71,19 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
      *
      * @see io.netty.resolver.DefaultAddressResolverGroup
      */
-    @SuppressWarnings("unchecked")
     public Bootstrap resolver(AddressResolverGroup<?> resolver) {
-        this.resolver = (AddressResolverGroup<SocketAddress>) (resolver == null ? DEFAULT_RESOLVER : resolver);
+        externalResolver = resolver == null ? null : new ExternalAddressResolver(resolver);
+        disableResolver = false;
+        return this;
+    }
+
+    /**
+     * Disables address name resolution. Name resolution may be re-enabled with
+     * {@link Bootstrap#resolver(AddressResolverGroup)}
+     */
+    public Bootstrap disableResolver() {
+        externalResolver = null;
+        disableResolver = true;
         return this;
     }
 
@@ -187,14 +196,27 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
 
     private ChannelFuture doResolveAndConnect0(final Channel channel, SocketAddress remoteAddress,
                                                final SocketAddress localAddress, final ChannelPromise promise) {
+        // The Channel was created and registered before the address resolution started. Close it if the connect
+        // attempt fails or is cancelled while resolution is still in progress.
+        promise.addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+        if (promise.isDone()) {
+            return promise;
+        }
+
         try {
+            if (disableResolver) {
+                doConnect(remoteAddress, localAddress, promise);
+                return promise;
+            }
+
             final EventLoop eventLoop = channel.eventLoop();
             AddressResolver<SocketAddress> resolver;
             try {
-                resolver = this.resolver.getResolver(eventLoop);
+                resolver = ExternalAddressResolver.getOrDefault(externalResolver).getResolver(eventLoop);
             } catch (Throwable cause) {
                 channel.close();
-                return promise.setFailure(cause);
+                promise.tryFailure(cause);
+                return promise;
             }
 
             if (!resolver.isSupported(remoteAddress) || resolver.isResolved(remoteAddress)) {
@@ -211,7 +233,7 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
                 if (resolveFailureCause != null) {
                     // Failed to resolve immediately
                     channel.close();
-                    promise.setFailure(resolveFailureCause);
+                    promise.tryFailure(resolveFailureCause);
                 } else {
                     // Succeeded to resolve immediately; cached? (or did a blocking lookup)
                     doConnect(resolveFuture.getNow(), localAddress, promise);
@@ -223,10 +245,11 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
             resolveFuture.addListener(new FutureListener<SocketAddress>() {
                 @Override
                 public void operationComplete(Future<SocketAddress> future) throws Exception {
-                    if (future.cause() != null) {
+                    Throwable cause = future.cause();
+                    if (cause != null) {
                         channel.close();
-                        promise.setFailure(future.cause());
-                    } else {
+                        promise.tryFailure(cause);
+                    } else if (!promise.isDone()) {
                         doConnect(future.getNow(), localAddress, promise);
                     }
                 }
@@ -251,18 +274,28 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
                 } else {
                     channel.connect(remoteAddress, localAddress, connectPromise);
                 }
-                connectPromise.addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
             }
         });
     }
 
     @Override
-    void init(Channel channel) {
+    void init(Channel channel) throws Throwable {
         ChannelPipeline p = channel.pipeline();
         p.addLast(config.handler());
 
         setChannelOptions(channel, newOptionsArray(), logger);
+
         setAttributes(channel, newAttributesArray());
+        Collection<ChannelInitializerExtension> extensions = getInitializerExtensions();
+        if (!extensions.isEmpty()) {
+            for (ChannelInitializerExtension extension : extensions) {
+                try {
+                    extension.postInitializeClientChannel(channel);
+                } catch (Exception e) {
+                    logger.warn("Exception thrown from postInitializeClientChannel", e);
+                }
+            }
+        }
     }
 
     @Override
@@ -301,6 +334,29 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     final AddressResolverGroup<?> resolver() {
-        return resolver;
+        if (disableResolver) {
+            return null;
+        }
+        return ExternalAddressResolver.getOrDefault(externalResolver);
+    }
+
+    /* Holder to avoid NoClassDefFoundError in case netty-resolver dependency is excluded
+       (e.g. some address families do not need name resolution) */
+    static final class ExternalAddressResolver {
+        final AddressResolverGroup<SocketAddress> resolverGroup;
+
+        @SuppressWarnings("unchecked")
+        ExternalAddressResolver(AddressResolverGroup<?> resolverGroup) {
+            this.resolverGroup = (AddressResolverGroup<SocketAddress>) resolverGroup;
+        }
+
+        @SuppressWarnings("unchecked")
+        static AddressResolverGroup<SocketAddress> getOrDefault(ExternalAddressResolver externalResolver) {
+            if (externalResolver == null) {
+                AddressResolverGroup<?> defaultResolverGroup = DefaultAddressResolverGroup.INSTANCE;
+                return (AddressResolverGroup<SocketAddress>) defaultResolverGroup;
+            }
+            return externalResolver.resolverGroup;
+        }
     }
 }

@@ -15,6 +15,7 @@
  */
 package io.netty.handler.codec.http.websocketx;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
@@ -111,7 +112,7 @@ public class WebSocketServerHandshaker00Test extends WebSocketServerHandshakerTe
         }
 
         EmbeddedChannel ch2 = new EmbeddedChannel(new HttpResponseDecoder());
-        ch2.writeInbound(ch.readOutbound());
+        ch2.writeInbound(ch.<ByteBuf>readOutbound());
         HttpResponse res = ch2.readInbound();
 
         assertEquals("ws://example.com/chat", res.headers().get(HttpHeaderNames.SEC_WEBSOCKET_LOCATION));
@@ -126,5 +127,20 @@ public class WebSocketServerHandshaker00Test extends WebSocketServerHandshakerTe
         assertEquals("8jKS'y:G*Co,Wxa-", content.content().toString(CharsetUtil.US_ASCII));
         content.release();
         req.release();
+    }
+
+    @Override
+    public void testHandshakeExceptionWhenConnectionHeaderIsAbsent() {
+        // ignore
+    }
+
+    @Override
+    public void testHandshakeExceptionWhenInvalidConnectionHeader() {
+        // ignore
+    }
+
+    @Override
+    public void testHandshakeExceptionWhenInvalidUpgradeHeader() {
+        // ignore
     }
 }

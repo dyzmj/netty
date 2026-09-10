@@ -82,7 +82,7 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
         String newpostfix;
         String diskFilename = getDiskFilename();
         if (diskFilename != null) {
-            newpostfix = '_' + diskFilename;
+            newpostfix = '_' + Integer.toString(diskFilename.hashCode());
         } else {
             newpostfix = getPostfix();
         }
@@ -228,7 +228,7 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
         }
         file = tempFile();
         RandomAccessFile accessFile = new RandomAccessFile(file, "rw");
-        int written = 0;
+        long written = 0;
         try {
             accessFile.setLength(0);
             FileChannel localfileChannel = accessFile.getChannel();
@@ -239,6 +239,7 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
                 byteBuffer.position(read).flip();
                 written += localfileChannel.write(byteBuffer);
                 checkSize(written);
+                byteBuffer.clear();
                 read = inputStream.read(bytes);
             }
             localfileChannel.force(false);

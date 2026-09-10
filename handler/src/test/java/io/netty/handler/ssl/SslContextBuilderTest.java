@@ -16,6 +16,7 @@
 package io.netty.handler.ssl;
 
 import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.CharsetUtil;
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,7 @@ import java.io.ByteArrayInputStream;
 import java.net.Socket;
 import java.security.Principal;
 import java.security.PrivateKey;
+import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Collections;
@@ -39,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class SslContextBuilderTest {
@@ -63,6 +66,17 @@ public class SslContextBuilderTest {
     public void testClientContextOpenssl() throws Exception {
         OpenSsl.ensureAvailability();
         testClientContext(SslProvider.OPENSSL);
+    }
+
+    @Test
+    public void testCombinedPemFileClientContextJdk() throws Exception {
+        testServerContextWithCombinedCertAndKeyInPem(SslProvider.JDK);
+    }
+
+    @Test
+    public void testCombinedPemFileClientContextOpenssl() throws Exception {
+        OpenSsl.ensureAvailability();
+        testServerContextWithCombinedCertAndKeyInPem(SslProvider.OPENSSL);
     }
 
     @Test
@@ -111,28 +125,19 @@ public class SslContextBuilderTest {
     }
 
     @Test
-    public void testUnsupportedPrivateKeyFailsFastForServer() throws Exception {
-        assumeTrue(OpenSsl.isBoringSSL());
-        assertThrows(SSLException.class, new Executable() {
-            @Override
-            public void execute() throws Throwable {
-                testUnsupportedPrivateKeyFailsFast(true);
-            }
-        });
+    public void testUnsupportedPrivateKeyFailsFastForServer() {
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
+        testUnsupportedPrivateKeyFailsFast(true);
     }
 
     @Test
-    public void testUnsupportedPrivateKeyFailsFastForClient() throws Exception {
-        assumeTrue(OpenSsl.isBoringSSL());
-        assertThrows(SSLException.class, new Executable() {
-            @Override
-            public void execute() throws Throwable {
-                testUnsupportedPrivateKeyFailsFast(false);
-            }
-        });
+    public void testUnsupportedPrivateKeyFailsFastForClient() {
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
+        testUnsupportedPrivateKeyFailsFast(false);
     }
-    private static void testUnsupportedPrivateKeyFailsFast(boolean server) throws Exception {
-        assumeTrue(OpenSsl.isBoringSSL());
+
+    private static void testUnsupportedPrivateKeyFailsFast(boolean server) {
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         String cert = "-----BEGIN CERTIFICATE-----\n" +
                 "MIICODCCAY2gAwIBAgIEXKTrajAKBggqhkjOPQQDBDBUMQswCQYDVQQGEwJVUzEM\n" +
                 "MAoGA1UECAwDTi9hMQwwCgYDVQQHDANOL2ExDDAKBgNVBAoMA04vYTEMMAoGA1UE\n" +
@@ -155,15 +160,64 @@ public class SslContextBuilderTest {
                 "hq7/O+wB4VuP+r7qx+PWN2dSTpCwzHbaQDCmVceZ3PXPlKFdDuYNk/ENuEI8QBRf\n" +
                 "MjM6q9YhnIAeAXFleZAoSETEDyfGBIi/NDe5wzA=\n" +
                 "-----END PRIVATE KEY-----";
-        if (server) {
-            SslContextBuilder.forServer(new ByteArrayInputStream(cert.getBytes(CharsetUtil.US_ASCII)),
-                    new ByteArrayInputStream(key.getBytes(CharsetUtil.US_ASCII)), null)
-                    .sslProvider(SslProvider.OPENSSL).build();
-        } else {
-            SslContextBuilder.forClient().keyManager(new ByteArrayInputStream(cert.getBytes(CharsetUtil.US_ASCII)),
-                new ByteArrayInputStream(key.getBytes(CharsetUtil.US_ASCII)), null)
-                    .sslProvider(SslProvider.OPENSSL).build();
+        ByteArrayInputStream certStream = new ByteArrayInputStream(cert.getBytes(CharsetUtil.US_ASCII));
+        ByteArrayInputStream keyStream = new ByteArrayInputStream(key.getBytes(CharsetUtil.US_ASCII));
+        final SslContextBuilder builder;
+        try {
+            if (server) {
+                builder = SslContextBuilder.forServer(certStream, keyStream, null);
+            } else {
+                builder = SslContextBuilder.forClient().keyManager(certStream, keyStream, null);
+            }
+        } catch (IllegalArgumentException e) {
+            assumeFalse("Input stream not contain valid certificates.".equals(e.getMessage())
+                        && e.getCause() != null
+                        && "java.io.IOException: Unknown named curve: 1.3.132.0.39".equals(
+                                e.getCause().getMessage()),
+                        "Cannot test that SslProvider rejects certificates with curve " +
+                        "1.3.132.0.39 because the key manager does not know the curve either.");
+            throw e;
         }
+        assertThrows(SSLException.class, new Executable() {
+            @Override
+            public void execute() throws Throwable {
+                builder.sslProvider(SslProvider.OPENSSL).build();
+            }
+        });
+    }
+
+    private void testServerContextWithCombinedCertAndKeyInPem(SslProvider provider) throws SSLException {
+        String pem = "-----BEGIN CERTIFICATE-----\n" +
+                     "MIIB1jCCAX0CCQDq4PSOirh7MDAJBgcqhkjOPQQBMHIxCzAJBgNVBAYTAlVTMQsw\n" +
+                     "CQYDVQQIDAJDQTEMMAoGA1UEBwwDRm9vMQwwCgYDVQQKDANCYXIxDDAKBgNVBAsM\n" +
+                     "A0JhejEQMA4GA1UEAwwHQmFyLmNvbTEaMBgGCSqGSIb3DQEJARYLZm9vQGJhci5j\n" +
+                     "b20wHhcNMjIxMDAyMTYzODAyWhcNMjIxMjAxMTYzODAyWjB2MQswCQYDVQQGEwJV\n" +
+                     "UzELMAkGA1UECAwCQ0ExDDAKBgNVBAcMA0ZvbzEMMAoGA1UECgwDQmFyMQwwCgYD\n" +
+                     "VQQLDANiYXoxFDASBgNVBAMMC2Jhci5iYXIuYmF6MRowGAYJKoZIhvcNAQkBFgtm\n" +
+                     "b29AYmFyLmNvbTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABHiEmjPEqQbqXYMB\n" +
+                     "nAPOv24rJf6MhTwHB0QC1suZ9q9XFUkalnqGryqf/emHs81RsXWKz4sCsbIJkmHz\n" +
+                     "H8HYhmkwCQYHKoZIzj0EAQNIADBFAiBCgzxZ5qviemPdejt2WazSgwNJTbirzoQa\n" +
+                     "FMv2XFTTCwIhANS3fZ8BulbYkdRWVEFwm2FGotqLfC60JA/gg/brlWSP\n" +
+                     "-----END CERTIFICATE-----\n" +
+                     "-----BEGIN EC PRIVATE KEY-----\n" +
+                     "MHcCAQEEIF8RlaD0JX8u2Lryq1+AbYfDaTBPJnPSA8+N2L12YuuUoAoGCCqGSM49\n" +
+                     "AwEHoUQDQgAEeISaM8SpBupdgwGcA86/bisl/oyFPAcHRALWy5n2r1cVSRqWeoav\n" +
+                     "Kp/96YezzVGxdYrPiwKxsgmSYfMfwdiGaQ==\n" +
+                     "-----END EC PRIVATE KEY-----";
+
+        ByteArrayInputStream certStream = new ByteArrayInputStream(pem.getBytes(CharsetUtil.US_ASCII));
+        ByteArrayInputStream keyStream = new ByteArrayInputStream(pem.getBytes(CharsetUtil.US_ASCII));
+
+        SslContext context = SslContextBuilder.forServer(certStream, keyStream, null)
+                                              .sslProvider(provider)
+                                              .clientAuth(ClientAuth.OPTIONAL)
+                                              .build();
+
+        SSLEngine engine = context.newEngine(UnpooledByteBufAllocator.DEFAULT);
+        assertTrue(engine.getWantClientAuth());
+        assertFalse(engine.getNeedClientAuth());
+        engine.closeInbound();
+        engine.closeOutbound();
     }
 
     @Test
@@ -192,8 +246,18 @@ public class SslContextBuilderTest {
         }
     }
 
+    @Test
+    public void testServerContextWithSecureRandom() throws Exception {
+        testServerContextWithSecureRandom(SslProvider.JDK, new SpySecureRandom());
+    }
+
+    @Test
+    public void testClientContextWithSecureRandom() throws Exception {
+        testClientContextWithSecureRandom(SslProvider.JDK, new SpySecureRandom());
+    }
+
     private static void testKeyStoreType(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forServer(cert.certificate(), cert.privateKey())
                 .sslProvider(provider)
                 .keyStoreType("PKCS12");
@@ -204,7 +268,7 @@ public class SslContextBuilderTest {
     }
 
     private static void testInvalidCipher(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forClient()
                 .sslProvider(provider)
                 .ciphers(Collections.singleton("SOME_INVALID_CIPHER"))
@@ -216,7 +280,7 @@ public class SslContextBuilderTest {
     }
 
     private static void testClientContextFromFile(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forClient()
                                                      .sslProvider(provider)
                                                      .keyManager(cert.certificate(),
@@ -232,7 +296,7 @@ public class SslContextBuilderTest {
     }
 
     private static void testClientContext(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forClient()
                                                      .sslProvider(provider)
                                                      .keyManager(cert.key(), cert.cert())
@@ -247,7 +311,7 @@ public class SslContextBuilderTest {
     }
 
     private static void testServerContextFromFile(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forServer(cert.certificate(), cert.privateKey())
                                                      .sslProvider(provider)
                                                      .trustManager(cert.certificate())
@@ -261,7 +325,7 @@ public class SslContextBuilderTest {
     }
 
     private static void testServerContext(SslProvider provider) throws Exception {
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         SslContextBuilder builder = SslContextBuilder.forServer(cert.key(), cert.cert())
                                                      .sslProvider(provider)
                                                      .trustManager(cert.cert())
@@ -274,8 +338,43 @@ public class SslContextBuilderTest {
         engine.closeOutbound();
     }
 
+    private static void testServerContextWithSecureRandom(SslProvider provider,
+                                                          SpySecureRandom secureRandom) throws Exception {
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
+        SslContextBuilder builder = SslContextBuilder.forServer(cert.key(), cert.cert())
+                .sslProvider(provider)
+                .secureRandom(secureRandom)
+                .trustManager(cert.cert())
+                .clientAuth(ClientAuth.REQUIRE);
+        SslContext context = builder.build();
+        SSLEngine engine = context.newEngine(UnpooledByteBufAllocator.DEFAULT);
+        assertFalse(engine.getWantClientAuth());
+        assertTrue(engine.getNeedClientAuth());
+        assertTrue(secureRandom.getCount() > 0);
+        engine.closeInbound();
+        engine.closeOutbound();
+    }
+
+    private static void testClientContextWithSecureRandom(SslProvider provider,
+                                                          SpySecureRandom secureRandom) throws Exception {
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
+        SslContextBuilder builder = SslContextBuilder.forClient()
+                .sslProvider(provider)
+                .secureRandom(secureRandom)
+                .keyManager(cert.key(), cert.cert())
+                .trustManager(cert.cert())
+                .clientAuth(ClientAuth.OPTIONAL);
+        SslContext context = builder.build();
+        SSLEngine engine = context.newEngine(UnpooledByteBufAllocator.DEFAULT);
+        assertFalse(engine.getWantClientAuth());
+        assertFalse(engine.getNeedClientAuth());
+        assertTrue(secureRandom.getCount() > 0);
+        engine.closeInbound();
+        engine.closeOutbound();
+    }
+
     private static void testContextFromManagers(SslProvider provider) throws Exception {
-        final SelfSignedCertificate cert = new SelfSignedCertificate();
+        final SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         KeyManager customKeyManager = new X509ExtendedKeyManager() {
             @Override
             public String[] getClientAliases(String s,
@@ -372,5 +471,55 @@ public class SslContextBuilderTest {
         assertTrue(server_engine.getNeedClientAuth());
         server_engine.closeInbound();
         server_engine.closeOutbound();
+    }
+
+    private static final class SpySecureRandom extends SecureRandom {
+        private int count;
+
+        @Override
+        public int nextInt() {
+            count++;
+            return super.nextInt();
+        }
+
+        @Override
+        public int nextInt(int bound) {
+            count++;
+            return super.nextInt(bound);
+        }
+
+        @Override
+        public long nextLong() {
+            count++;
+            return super.nextLong();
+        }
+
+        @Override
+        public boolean nextBoolean() {
+            count++;
+            return super.nextBoolean();
+        }
+
+        @Override
+        public float nextFloat() {
+            count++;
+            return super.nextFloat();
+        }
+
+        @Override
+        public double nextDouble() {
+            count++;
+            return super.nextDouble();
+        }
+
+        @Override
+        public double nextGaussian() {
+            count++;
+            return super.nextGaussian();
+        }
+
+        public int getCount() {
+            return count;
+        }
     }
 }

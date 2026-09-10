@@ -16,19 +16,34 @@
 package io.netty.handler.codec.http.websocketx;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.handler.codec.CorruptedFrameException;
 
 /**
  *
  */
 public class Utf8FrameValidator extends ChannelInboundHandlerAdapter {
 
+    private final boolean closeOnProtocolViolation;
+
     private int fragmentedFramesCount;
     private Utf8Validator utf8Validator;
+
+    public Utf8FrameValidator() {
+        this(true);
+    }
+
+    public Utf8FrameValidator(boolean closeOnProtocolViolation) {
+        this.closeOnProtocolViolation = closeOnProtocolViolation;
+    }
+
+    // See https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.
+    private static boolean isControlFrame(WebSocketFrame frame) {
+        return frame instanceof CloseWebSocketFrame ||
+                frame instanceof PingWebSocketFrame ||
+                frame instanceof PongWebSocketFrame;
+    }
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
@@ -38,14 +53,16 @@ public class Utf8FrameValidator extends ChannelInboundHandlerAdapter {
             try {
                 // Processing for possible fragmented messages for text and binary
                 // frames
-                if (((WebSocketFrame) msg).isFinalFragment()) {
-                    // Final frame of the sequence. Apparently ping frames are
-                    // allowed in the middle of a fragmented message
-                    if (!(frame instanceof PingWebSocketFrame)) {
+                if (frame.isFinalFragment()) {
+                    // Control frames are allowed between fragments
+                    // See https://datatracker.ietf.org/doc/html/rfc6455#section-5.5.
+                    if (!isControlFrame(frame)) {
+
+                        // Final frame of the sequence.
                         fragmentedFramesCount = 0;
 
                         // Check text for UTF8 correctness
-                        if ((frame instanceof TextWebSocketFrame) ||
+                        if (frame instanceof TextWebSocketFrame ||
                                 (utf8Validator != null && utf8Validator.isChecking())) {
                             // Check UTF-8 correctness for this payload
                             checkUTF8String(frame.content());
@@ -74,8 +91,7 @@ public class Utf8FrameValidator extends ChannelInboundHandlerAdapter {
                     fragmentedFramesCount++;
                 }
             } catch (CorruptedWebSocketFrameException e) {
-                frame.release();
-                throw e;
+                protocolViolation(ctx, frame, e);
             }
         }
 
@@ -89,11 +105,25 @@ public class Utf8FrameValidator extends ChannelInboundHandlerAdapter {
         utf8Validator.check(buffer);
     }
 
+    private void protocolViolation(ChannelHandlerContext ctx, WebSocketFrame frame,
+                                   CorruptedWebSocketFrameException ex) {
+        frame.release();
+        if (closeOnProtocolViolation && ctx.channel().isOpen()) {
+            WebSocketCloseStatus closeStatus = ex.closeStatus();
+            String reasonText = ex.getMessage();
+            if (reasonText == null) {
+                reasonText = closeStatus.reasonText();
+            }
+
+            CloseWebSocketFrame closeFrame = new CloseWebSocketFrame(closeStatus.code(), reasonText);
+            ctx.writeAndFlush(closeFrame).addListener(ChannelFutureListener.CLOSE);
+        }
+
+        throw ex;
+    }
+
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-        if (cause instanceof CorruptedFrameException && ctx.channel().isOpen()) {
-            ctx.writeAndFlush(Unpooled.EMPTY_BUFFER).addListener(ChannelFutureListener.CLOSE);
-        }
         super.exceptionCaught(ctx, cause);
     }
 }

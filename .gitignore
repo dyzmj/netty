@@ -24,15 +24,20 @@
 # Report directories
 /reports
 */reports
+.github/ghsa
 
 # Mac-specific directory that no other operating system needs.
 .DS_Store
 
 # JVM crash logs
 hs_err_pid*.log
+replay_pid*.log
+
+# JVM dumps
+*.hprof.xz
+*.threads
 
 dependency-reduced-pom.xml
-
 */.unison.*
 
 # exclude mainframer files
@@ -49,3 +54,4 @@ mainframer
 
 # exclude file created by the flatten plugin
 .flattened-pom.xml
+.java-version

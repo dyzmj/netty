@@ -22,7 +22,6 @@ import io.netty.util.DefaultAttributeMap;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -624,7 +623,6 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
          * Shutdown the output portion of the corresponding {@link Channel}.
          * For example this will clean up the {@link ChannelOutboundBuffer} and not allow any more writes.
          */
-        @UnstableApi
         public final void shutdownOutput(final ChannelPromise promise) {
             assertEventLoop();
             shutdownOutput(promise, null);
@@ -650,38 +648,20 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             final Throwable shutdownCause = cause == null ?
                     new ChannelOutputShutdownException("Channel output shutdown") :
                     new ChannelOutputShutdownException("Channel output shutdown", cause);
-            Executor closeExecutor = prepareToClose();
-            if (closeExecutor != null) {
-                closeExecutor.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        try {
-                            // Execute the shutdown.
-                            doShutdownOutput();
-                            promise.setSuccess();
-                        } catch (Throwable err) {
-                            promise.setFailure(err);
-                        } finally {
-                            // Dispatch to the EventLoop
-                            eventLoop().execute(new Runnable() {
-                                @Override
-                                public void run() {
-                                    closeOutboundBufferForShutdown(pipeline, outboundBuffer, shutdownCause);
-                                }
-                            });
-                        }
-                    }
-                });
-            } else {
-                try {
-                    // Execute the shutdown.
-                    doShutdownOutput();
-                    promise.setSuccess();
-                } catch (Throwable err) {
-                    promise.setFailure(err);
-                } finally {
-                    closeOutboundBufferForShutdown(pipeline, outboundBuffer, shutdownCause);
-                }
+
+            // When a side enables SO_LINGER and calls showdownOutput(...) to start TCP half-closure
+            // we can not call doDeregister here because we should ensure this side in fin_wait2 state
+            // can still receive and process the data which is send by another side in the close_wait state。
+            // See https://github.com/netty/netty/issues/11981
+            try {
+                // The shutdown function does not block regardless of the SO_LINGER setting on the socket
+                // so we don't need to use GlobalEventExecutor to execute the shutdown
+                doShutdownOutput();
+                promise.setSuccess();
+            } catch (Throwable err) {
+                promise.setFailure(err);
+            } finally {
+                closeOutboundBufferForShutdown(pipeline, outboundBuffer, shutdownCause);
             }
         }
 
@@ -1116,7 +1096,6 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
      * Called when conditions justify shutting down the output portion of the channel. This may happen if a write
      * operation throws an exception.
      */
-    @UnstableApi
     protected void doShutdownOutput() throws Exception {
         doClose();
     }
@@ -1194,7 +1173,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         // Suppress a warning since this method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }
@@ -1210,7 +1189,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         // Suppress a warning since this method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }
@@ -1226,7 +1205,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         // Suppress a warning since this method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }

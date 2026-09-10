@@ -177,13 +177,6 @@
         <optional>true</optional>
       </dependency>
       
-      <!-- Metrics providers -->
-      <dependency>
-        <groupId>com.yammer.metrics</groupId>
-        <artifactId>metrics-core</artifactId>
-        <version>2.2.0</version>
-      </dependency>
-      
       <!-- Test dependencies for jboss marshalling encoder/decoder -->
       <dependency>
         <groupId>org.jboss.marshalling</groupId>
@@ -210,12 +203,6 @@
 
   <dependencies>
     <!-- Testing frameworks and related dependencies -->
-    <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
-      <version>4.12</version>
-      <scope>test</scope>
-    </dependency>
     <dependency>
       <groupId>org.easymock</groupId>
       <artifactId>easymock</artifactId>

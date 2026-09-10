@@ -17,7 +17,6 @@ package io.netty.handler.codec.http2;
 
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerAdapter;
-import io.netty.util.internal.UnstableApi;
 
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
@@ -27,7 +26,6 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
  * @deprecated use {@link Http2FrameCodecBuilder} together with {@link Http2MultiplexHandler}.
  */
 @Deprecated
-@UnstableApi
 public class Http2MultiplexCodecBuilder
         extends AbstractHttp2ConnectionHandlerBuilder<Http2MultiplexCodec, Http2MultiplexCodecBuilder> {
     private Http2FrameWriter frameWriter;
@@ -130,6 +128,11 @@ public class Http2MultiplexCodecBuilder
     }
 
     @Override
+    public Http2MultiplexCodecBuilder validateRequiredPseudoHeaders(boolean validateRequiredPseudoHeaders) {
+        return super.validateRequiredPseudoHeaders(validateRequiredPseudoHeaders);
+    }
+
+    @Override
     public Http2FrameLogger frameLogger() {
         return super.frameLogger();
     }
@@ -197,6 +200,11 @@ public class Http2MultiplexCodecBuilder
     }
 
     @Override
+    public Http2MultiplexCodecBuilder flushPreface(boolean flushPreface) {
+        return super.flushPreface(flushPreface);
+    }
+
+    @Override
     public int decoderEnforceMaxConsecutiveEmptyDataFrames() {
         return super.decoderEnforceMaxConsecutiveEmptyDataFrames();
     }
@@ -204,6 +212,29 @@ public class Http2MultiplexCodecBuilder
     @Override
     public Http2MultiplexCodecBuilder decoderEnforceMaxConsecutiveEmptyDataFrames(int maxConsecutiveEmptyFrames) {
         return super.decoderEnforceMaxConsecutiveEmptyDataFrames(maxConsecutiveEmptyFrames);
+    }
+
+    @Override
+    public Http2MultiplexCodecBuilder decoderEnforceMaxRstFramesPerWindow(
+            int maxRstFramesPerWindow, int secondsPerWindow) {
+        return super.decoderEnforceMaxRstFramesPerWindow(maxRstFramesPerWindow, secondsPerWindow);
+    }
+
+    @Override
+    public Http2MultiplexCodecBuilder encoderEnforceMaxRstFramesPerWindow(
+            int maxRstFramesPerWindow, int secondsPerWindow) {
+        return super.encoderEnforceMaxRstFramesPerWindow(maxRstFramesPerWindow, secondsPerWindow);
+    }
+
+    @Override
+    public int decoderEnforceMaxSmallContinuationFrames() {
+        return super.decoderEnforceMaxSmallContinuationFrames();
+    }
+
+    @Override
+    public Http2MultiplexCodecBuilder decoderEnforceMaxSmallContinuationFrames(
+            int maxConsecutiveContinuationsFrames) {
+        return super.decoderEnforceMaxSmallContinuationFrames(maxConsecutiveContinuationsFrames);
     }
 
     @Override
@@ -216,7 +247,8 @@ public class Http2MultiplexCodecBuilder
             Long maxHeaderListSize = initialSettings().maxHeaderListSize();
             Http2FrameReader frameReader = new DefaultHttp2FrameReader(maxHeaderListSize == null ?
                     new DefaultHttp2HeadersDecoder(isValidateHeaders()) :
-                    new DefaultHttp2HeadersDecoder(isValidateHeaders(), maxHeaderListSize));
+                    new DefaultHttp2HeadersDecoder(isValidateHeaders(), maxHeaderListSize),
+                    decoderEnforceMaxSmallContinuationFrames());
 
             if (frameLogger() != null) {
                 frameWriter = new Http2OutboundFrameLogger(frameWriter, frameLogger());
@@ -227,8 +259,8 @@ public class Http2MultiplexCodecBuilder
                 encoder = new StreamBufferingEncoder(encoder);
             }
             Http2ConnectionDecoder decoder = new DefaultHttp2ConnectionDecoder(connection, encoder, frameReader,
-                    promisedRequestVerifier(), isAutoAckSettingsFrame(), isAutoAckPingFrame());
-
+                    promisedRequestVerifier(), isAutoAckSettingsFrame(), isAutoAckPingFrame(), isValidateHeaders(),
+                    isValidateRequiredPseudoHeaders());
             int maxConsecutiveEmptyDataFrames = decoderEnforceMaxConsecutiveEmptyDataFrames();
             if (maxConsecutiveEmptyDataFrames > 0) {
                 decoder = new Http2EmptyDataFrameConnectionDecoder(decoder, maxConsecutiveEmptyDataFrames);
@@ -243,7 +275,7 @@ public class Http2MultiplexCodecBuilder
     protected Http2MultiplexCodec build(
             Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
         Http2MultiplexCodec codec = new Http2MultiplexCodec(encoder, decoder, initialSettings, childHandler,
-                upgradeStreamHandler, decoupleCloseAndGoAway());
+                upgradeStreamHandler, decoupleCloseAndGoAway(), flushPreface());
         codec.gracefulShutdownTimeoutMillis(gracefulShutdownTimeoutMillis());
         return codec;
     }

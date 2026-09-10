@@ -29,6 +29,7 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.CharsetUtil;
+import io.netty.util.NetUtil;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -44,8 +46,6 @@ public class DefaultHttp2PushPromiseFrameTest {
     private final EventLoopGroup eventLoopGroup = new NioEventLoopGroup(2);
     private final ClientHandler clientHandler = new ClientHandler();
     private final Map<Integer, String> contentMap = new ConcurrentHashMap<Integer, String>();
-
-    private ChannelFuture connectionFuture;
 
     @BeforeEach
     public void setup() throws InterruptedException {
@@ -67,7 +67,7 @@ public class DefaultHttp2PushPromiseFrameTest {
                     }
                 });
 
-        ChannelFuture channelFuture = serverBootstrap.bind(0).sync();
+        ChannelFuture channelFuture = serverBootstrap.bind(NetUtil.LOCALHOST, 0).sync();
 
         final Bootstrap bootstrap = new Bootstrap()
                 .group(eventLoopGroup)
@@ -88,17 +88,12 @@ public class DefaultHttp2PushPromiseFrameTest {
                     }
                 });
 
-        connectionFuture = bootstrap.connect(channelFuture.channel().localAddress());
+         bootstrap.connect(channelFuture.channel().localAddress()).sync();
     }
 
     @Test
-    public void send() {
-        connectionFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                clientHandler.write();
-            }
-        });
+    public void send() throws Exception {
+        clientHandler.write();
     }
 
     @AfterEach
@@ -176,14 +171,17 @@ public class DefaultHttp2PushPromiseFrameTest {
 
     private static final class ClientHandler extends Http2ChannelDuplexHandler {
 
-        private ChannelHandlerContext ctx;
+        private final CountDownLatch latch = new CountDownLatch(1);
+        private volatile ChannelHandlerContext ctx;
 
         @Override
         public void channelActive(ChannelHandlerContext ctx) throws InterruptedException {
             this.ctx = ctx;
+            latch.countDown();
         }
 
-        void write() {
+        void write() throws InterruptedException {
+            latch.await();
             Http2Headers http2Headers = new DefaultHttp2Headers();
             http2Headers.path("/")
                     .authority("localhost")

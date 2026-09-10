@@ -16,20 +16,23 @@
 
 package io.netty.util.concurrent;
 
+import io.netty.util.internal.InternalThreadLocalMap;
 import io.netty.util.internal.ObjectCleaner;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.lang.reflect.Field;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.nullValue;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,7 +40,23 @@ public class FastThreadLocalTest {
     @BeforeEach
     public void setUp() {
         FastThreadLocal.removeAll();
-        assertThat(FastThreadLocal.size(), is(0));
+        assertEquals(0, FastThreadLocal.size());
+    }
+
+    @Test
+    public void testGetAndSetReturnsOldValue() {
+        FastThreadLocal<Boolean> threadLocal = new FastThreadLocal<Boolean>() {
+            @Override
+            protected Boolean initialValue() {
+                return Boolean.TRUE;
+            }
+        };
+
+        assertNull(threadLocal.getAndSet(Boolean.FALSE));
+        assertEquals(Boolean.FALSE, threadLocal.get());
+        assertEquals(Boolean.FALSE, threadLocal.getAndSet(Boolean.TRUE));
+        assertEquals(Boolean.TRUE, threadLocal.get());
+        threadLocal.remove();
     }
 
     @Test
@@ -69,13 +88,13 @@ public class FastThreadLocalTest {
         };
 
         // Initialize a thread-local variable.
-        assertThat(var.get(), is(nullValue()));
-        assertThat(FastThreadLocal.size(), is(1));
+        assertNull(var.get());
+        assertEquals(1, FastThreadLocal.size());
 
         // And then remove it.
         FastThreadLocal.removeAll();
-        assertThat(removed.get(), is(true));
-        assertThat(FastThreadLocal.size(), is(0));
+        assertTrue(removed.get());
+        assertEquals(0, FastThreadLocal.size());
     }
 
     @Test
@@ -100,65 +119,6 @@ public class FastThreadLocalTest {
         if (t != null) {
             throw t;
         }
-    }
-
-    @Test
-    public void testMultipleSetRemove() throws Exception {
-        final FastThreadLocal<String> threadLocal = new FastThreadLocal<String>();
-        final Runnable runnable = new Runnable() {
-            @Override
-            public void run() {
-                threadLocal.set("1");
-                threadLocal.remove();
-                threadLocal.set("2");
-                threadLocal.remove();
-            }
-        };
-
-        final int sizeWhenStart = ObjectCleaner.getLiveSetCount();
-        Thread thread = new Thread(runnable);
-        thread.start();
-        thread.join();
-
-        assertEquals(0, ObjectCleaner.getLiveSetCount() - sizeWhenStart);
-
-        Thread thread2 = new Thread(runnable);
-        thread2.start();
-        thread2.join();
-
-        assertEquals(0, ObjectCleaner.getLiveSetCount() - sizeWhenStart);
-    }
-
-    @Test
-    public void testMultipleSetRemove_multipleThreadLocal() throws Exception {
-        final FastThreadLocal<String> threadLocal = new FastThreadLocal<String>();
-        final FastThreadLocal<String> threadLocal2 = new FastThreadLocal<String>();
-        final Runnable runnable = new Runnable() {
-            @Override
-            public void run() {
-                threadLocal.set("1");
-                threadLocal.remove();
-                threadLocal.set("2");
-                threadLocal.remove();
-                threadLocal2.set("1");
-                threadLocal2.remove();
-                threadLocal2.set("2");
-                threadLocal2.remove();
-            }
-        };
-
-        final int sizeWhenStart = ObjectCleaner.getLiveSetCount();
-        Thread thread = new Thread(runnable);
-        thread.start();
-        thread.join();
-
-        assertEquals(0, ObjectCleaner.getLiveSetCount() - sizeWhenStart);
-
-        Thread thread2 = new Thread(runnable);
-        thread2.start();
-        thread2.join();
-
-        assertEquals(0, ObjectCleaner.getLiveSetCount() - sizeWhenStart);
     }
 
     @Test
@@ -237,5 +197,121 @@ public class FastThreadLocalTest {
         protected void onRemoval(String value) throws Exception {
             onRemovalCalled.set(value);
         }
+    }
+
+    @Test
+    public void testConstructionWithIndex() throws Exception {
+        int ARRAY_LIST_CAPACITY_MAX_SIZE = Integer.MAX_VALUE - 8;
+        Field nextIndexField =
+                InternalThreadLocalMap.class.getDeclaredField("nextIndex");
+        nextIndexField.setAccessible(true);
+        AtomicInteger nextIndex = (AtomicInteger) nextIndexField.get(AtomicInteger.class);
+        int nextIndex_before = nextIndex.get();
+        final AtomicReference<Throwable> throwable = new AtomicReference<Throwable>();
+        try {
+            while (nextIndex.get() < ARRAY_LIST_CAPACITY_MAX_SIZE) {
+                new FastThreadLocal<Boolean>();
+            }
+            assertEquals(ARRAY_LIST_CAPACITY_MAX_SIZE - 1, InternalThreadLocalMap.lastVariableIndex());
+            try {
+                new FastThreadLocal<Boolean>();
+            } catch (Throwable t) {
+                throwable.set(t);
+            } finally {
+                // Assert the max index cannot greater than (ARRAY_LIST_CAPACITY_MAX_SIZE - 1).
+                assertInstanceOf(IllegalStateException.class, throwable.get());
+                // Assert the index was reset to ARRAY_LIST_CAPACITY_MAX_SIZE
+                // after it reaches ARRAY_LIST_CAPACITY_MAX_SIZE.
+                assertEquals(ARRAY_LIST_CAPACITY_MAX_SIZE - 1, InternalThreadLocalMap.lastVariableIndex());
+            }
+        } finally {
+            // Restore the index.
+            nextIndex.set(nextIndex_before);
+        }
+    }
+
+    @EnabledIfEnvironmentVariable(named = "CI", matches = "true", disabledReason = "" +
+            "This deliberately causes OutOfMemoryErrors, for which heap dumps are automatically generated. " +
+            "To avoid confusion, wasted time investigating heap dumps, and to avoid heap dumps accidentally " +
+            "getting committed to the Git repository, we should only enable this test when running in a CI " +
+            "environment. We make this check by assuming a 'CI' environment variable. " +
+            "This matches what Github Actions is doing for us currently.")
+    @Test
+    public void testInternalThreadLocalMapExpand() throws Exception {
+        final AtomicReference<Throwable> throwable = new AtomicReference<Throwable>();
+        Runnable runnable = new Runnable() {
+            @Override
+            public void run() {
+                int expand_threshold = 1 << 30;
+                try {
+                    InternalThreadLocalMap.get().setIndexedVariable(expand_threshold, null);
+                } catch (Throwable t) {
+                    throwable.set(t);
+                }
+            }
+        };
+        FastThreadLocalThread fastThreadLocalThread = new FastThreadLocalThread(runnable);
+        fastThreadLocalThread.start();
+        fastThreadLocalThread.join();
+        // assert the expanded size is not overflowed to negative value
+        assertThat(throwable.get()).isNotInstanceOf(NegativeArraySizeException.class);
+    }
+
+    @Test
+    public void testFastThreadLocalSize() throws Exception {
+        int originSize = FastThreadLocal.size();
+        assertTrue(originSize >= 0);
+
+        InternalThreadLocalMap.get();
+        assertEquals(originSize, FastThreadLocal.size());
+
+        new FastThreadLocal<Boolean>();
+        assertEquals(originSize, FastThreadLocal.size());
+
+        FastThreadLocal<Boolean> fst2 = new FastThreadLocal<Boolean>();
+        fst2.get();
+        assertEquals(1 + originSize, FastThreadLocal.size());
+
+        FastThreadLocal<Boolean> fst3 = new FastThreadLocal<Boolean>();
+        fst3.set(null);
+        assertEquals(2 + originSize, FastThreadLocal.size());
+
+        FastThreadLocal<Boolean> fst4 = new FastThreadLocal<Boolean>();
+        fst4.set(Boolean.TRUE);
+        assertEquals(3 + originSize, FastThreadLocal.size());
+
+        fst4.set(Boolean.TRUE);
+        assertEquals(3 + originSize, FastThreadLocal.size());
+
+        fst4.remove();
+        assertEquals(2 + originSize, FastThreadLocal.size());
+
+        FastThreadLocal.removeAll();
+        assertEquals(0, FastThreadLocal.size());
+    }
+
+    @Test
+    public void testFastThreadLocalInitialValueWithUnset() throws Exception {
+        final AtomicReference<Throwable> throwable = new AtomicReference<Throwable>();
+        final FastThreadLocal fst = new FastThreadLocal() {
+            @Override
+            protected Object initialValue() throws Exception {
+                return InternalThreadLocalMap.UNSET;
+            }
+        };
+        Runnable runnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    fst.get();
+                } catch (Throwable t) {
+                    throwable.set(t);
+                }
+            }
+        };
+        FastThreadLocalThread fastThreadLocalThread = new FastThreadLocalThread(runnable);
+        fastThreadLocalThread.start();
+        fastThreadLocalThread.join();
+        assertInstanceOf(IllegalArgumentException.class, throwable.get());
     }
 }

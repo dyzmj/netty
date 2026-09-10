@@ -21,9 +21,11 @@ import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.util.CharsetUtil;
 
+import static io.netty.handler.codec.http.HttpMethod.GET;
 import static io.netty.handler.codec.http.HttpVersion.*;
 
 /**
@@ -128,7 +130,20 @@ public class WebSocketServerHandshaker07 extends WebSocketServerHandshaker {
      */
     @Override
     protected FullHttpResponse newHandshakeResponse(FullHttpRequest req, HttpHeaders headers) {
-        CharSequence key = req.headers().get(HttpHeaderNames.SEC_WEBSOCKET_KEY);
+        HttpMethod method = req.method();
+        if (!GET.equals(method)) {
+            throw new WebSocketServerHandshakeException("Invalid WebSocket handshake method: " + method, req);
+        }
+        HttpHeaders reqHeaders = req.headers();
+        if (!reqHeaders.containsValue(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE, true)) {
+            throw new WebSocketServerHandshakeException(
+                    "not a WebSocket request: a |Connection| header must include a token 'Upgrade'", req);
+        }
+        if (!reqHeaders.contains(HttpHeaderNames.UPGRADE, HttpHeaderValues.WEBSOCKET, true)) {
+            throw new WebSocketServerHandshakeException(
+                    "not a WebSocket request: an |Upgrade| header must containing the value 'websocket'", req);
+        }
+        CharSequence key = reqHeaders.get(HttpHeaderNames.SEC_WEBSOCKET_KEY);
         if (key == null) {
             throw new WebSocketServerHandshakeException("not a WebSocket request: missing key", req);
         }

@@ -16,7 +16,6 @@
 package io.netty.handler.codec.dns;
 
 import io.netty.channel.AddressedEnvelope;
-import io.netty.util.internal.UnstableApi;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -24,7 +23,6 @@ import java.net.SocketAddress;
 /**
  * A {@link DnsResponse} implementation for UDP/IP.
  */
-@UnstableApi
 public class DatagramDnsResponse extends DefaultDnsResponse
         implements AddressedEnvelope<DatagramDnsResponse, InetSocketAddress> {
 
@@ -202,14 +200,10 @@ public class DatagramDnsResponse extends DefaultDnsResponse
         }
 
         if (recipient() == null) {
-            if (that.recipient() != null) {
-                return false;
-            }
-        } else if (!recipient().equals(that.recipient())) {
-            return false;
+            return that.recipient() == null;
+        } else {
+            return recipient().equals(that.recipient());
         }
-
-        return true;
     }
 
     @Override

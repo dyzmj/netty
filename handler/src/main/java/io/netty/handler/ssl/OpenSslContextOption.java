@@ -58,4 +58,39 @@ public final class OpenSslContextOption<T> extends SslContextOption<T> {
      */
     public static final OpenSslContextOption<OpenSslAsyncPrivateKeyMethod> ASYNC_PRIVATE_KEY_METHOD =
             new OpenSslContextOption<OpenSslAsyncPrivateKeyMethod>("ASYNC_PRIVATE_KEY_METHOD");
+
+    /**
+     * Set the {@link OpenSslCertificateCompressionConfig} to use. This allows for the configuration of certificate
+     * compression algorithms which should be used, the priority of those algorithms and the directions in which
+     * they should be used.
+     *
+     * This is currently only supported when {@code BoringSSL} is used.
+     */
+    public static final OpenSslContextOption<OpenSslCertificateCompressionConfig> CERTIFICATE_COMPRESSION_ALGORITHMS =
+            new OpenSslContextOption<OpenSslCertificateCompressionConfig>("CERTIFICATE_COMPRESSION_ALGORITHMS");
+
+    /**
+     * Set the maximum number of bytes that is allowed during the handshake for certificate chain.
+     */
+    public static final OpenSslContextOption<Integer> MAX_CERTIFICATE_LIST_BYTES =
+            new OpenSslContextOption<Integer>("MAX_CERTIFICATE_LIST_BYTES");
+
+    /**
+     * Set the groups that should be used. This will override curves set with {@code -Djdk.tls.namedGroups}.
+     * <p>
+     * See <a href="https://docs.openssl.org/master/man3/SSL_CTX_set1_groups_list/#description">
+     *     SSL_CTX_set1_groups_list</a>.
+     */
+    public static final OpenSslContextOption<String[]> GROUPS = new OpenSslContextOption<String[]>("GROUPS");
+
+    /**
+     * Set the desired length of the Diffie-Hellman ephemeral session keys.
+     * This will override the key length set with {@code -Djdk.tls.ephemeralDHKeySize}.
+     * <p>
+     * The only supported values are {@code 512}, {@code 1024}, {@code 2048}, and {@code 4096}.
+     * <p>
+     * See <a href="https://docs.openssl.org/1.0.2/man3/SSL_CTX_set_tmp_dh_callback/">SSL_CTX_set_tmp_dh_callback</a>.
+     */
+    public static final OpenSslContextOption<Integer> TMP_DH_KEYLENGTH =
+            new OpenSslContextOption<Integer>("TMP_DH_KEYLENGTH");
 }

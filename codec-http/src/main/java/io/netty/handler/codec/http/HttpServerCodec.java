@@ -16,8 +16,12 @@
 package io.netty.handler.codec.http;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.CombinedChannelDuplexHandler;
+import io.netty.util.ReferenceCountUtil;
+import io.netty.util.internal.ObjectUtil;
 
 import java.util.ArrayDeque;
 import java.util.List;
@@ -31,17 +35,42 @@ import static io.netty.handler.codec.http.HttpObjectDecoder.DEFAULT_MAX_INITIAL_
  * A combination of {@link HttpRequestDecoder} and {@link HttpResponseEncoder}
  * which enables easier server side HTTP implementation.
  *
+ * <h3>Header Validation</h3>
+ *
+ * It is recommended to always enable header validation.
+ * <p>
+ * Without header validation, your system can become vulnerable to
+ * <a href="https://cwe.mitre.org/data/definitions/113.html">
+ *     CWE-113: Improper Neutralization of CRLF Sequences in HTTP Headers ('HTTP Response Splitting')
+ * </a>.
+ * <p>
+ * This recommendation stands even when both peers in the HTTP exchange are trusted,
+ * as it helps with defence-in-depth.
+ *
  * @see HttpClientCodec
  */
 public final class HttpServerCodec extends CombinedChannelDuplexHandler<HttpRequestDecoder, HttpResponseEncoder>
         implements HttpServerUpgradeHandler.SourceCodec {
 
+    /**
+     * The maximum number of pipelined requests we allow to be awaiting a response by default, before
+     * decoding of further requests is rejected. This bounds the memory a single connection can force us
+     * to hold onto if the peer pipelines requests without reading the corresponding responses.
+     */
+    static final int DEFAULT_MAX_PIPELINE_DEPTH = 128;
+
     /** A queue that is used for correlating a request and a response. */
     private final Queue<HttpMethod> queue = new ArrayDeque<HttpMethod>();
+    private final int maxPipelineDepth;
+
+    /**
+     * When set, the connection will be closed after the next response is written.
+     */
+    private boolean mustCloseAfterResponse;
 
     /**
      * Creates a new instance with the default decoder options
-     * ({@code maxInitialLineLength (4096}}, {@code maxHeaderSize (8192)}, and
+     * ({@code maxInitialLineLength (4096)}, {@code maxHeaderSize (8192)}, and
      * {@code maxChunkSize (8192)}).
      */
     public HttpServerCodec() {
@@ -52,47 +81,99 @@ public final class HttpServerCodec extends CombinedChannelDuplexHandler<HttpRequ
      * Creates a new instance with the specified decoder options.
      */
     public HttpServerCodec(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize) {
-        init(new HttpServerRequestDecoder(maxInitialLineLength, maxHeaderSize, maxChunkSize),
-                new HttpServerResponseEncoder());
+        this(new HttpDecoderConfig()
+                .setMaxInitialLineLength(maxInitialLineLength)
+                .setMaxHeaderSize(maxHeaderSize)
+                .setMaxChunkSize(maxChunkSize));
     }
 
     /**
      * Creates a new instance with the specified decoder options.
+     *
+     * @deprecated Prefer the {@link #HttpServerCodec(HttpDecoderConfig)} constructor,
+     * to always enable header validation.
      */
+    @Deprecated
     public HttpServerCodec(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize, boolean validateHeaders) {
-        init(new HttpServerRequestDecoder(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders),
-                new HttpServerResponseEncoder());
+        this(new HttpDecoderConfig()
+                .setMaxInitialLineLength(maxInitialLineLength)
+                .setMaxHeaderSize(maxHeaderSize)
+                .setMaxChunkSize(maxChunkSize)
+                .setValidateHeaders(validateHeaders));
     }
 
     /**
      * Creates a new instance with the specified decoder options.
+     *
+     * @deprecated Prefer the {@link #HttpServerCodec(HttpDecoderConfig)} constructor, to always enable header
+     * validation.
      */
+    @Deprecated
     public HttpServerCodec(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize, boolean validateHeaders,
                            int initialBufferSize) {
-        init(
-          new HttpServerRequestDecoder(maxInitialLineLength, maxHeaderSize, maxChunkSize,
-                  validateHeaders, initialBufferSize),
-          new HttpServerResponseEncoder());
+        this(new HttpDecoderConfig()
+                .setMaxInitialLineLength(maxInitialLineLength)
+                .setMaxHeaderSize(maxHeaderSize)
+                .setMaxChunkSize(maxChunkSize)
+                .setValidateHeaders(validateHeaders)
+                .setInitialBufferSize(initialBufferSize));
     }
 
     /**
      * Creates a new instance with the specified decoder options.
+     *
+     * @deprecated Prefer the {@link #HttpServerCodec(HttpDecoderConfig)} constructor,
+     * to always enable header validation.
      */
+    @Deprecated
     public HttpServerCodec(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize, boolean validateHeaders,
                            int initialBufferSize, boolean allowDuplicateContentLengths) {
-        init(new HttpServerRequestDecoder(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders,
-                                          initialBufferSize, allowDuplicateContentLengths),
-             new HttpServerResponseEncoder());
+        this(new HttpDecoderConfig()
+                .setMaxInitialLineLength(maxInitialLineLength)
+                .setMaxHeaderSize(maxHeaderSize)
+                .setMaxChunkSize(maxChunkSize)
+                .setValidateHeaders(validateHeaders)
+                .setInitialBufferSize(initialBufferSize)
+                .setAllowDuplicateContentLengths(allowDuplicateContentLengths));
     }
 
     /**
      * Creates a new instance with the specified decoder options.
+     *
+     * @deprecated Prefer the {@link #HttpServerCodec(HttpDecoderConfig)} constructor,
+     * to always enable header validation.
      */
+    @Deprecated
     public HttpServerCodec(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize, boolean validateHeaders,
                            int initialBufferSize, boolean allowDuplicateContentLengths, boolean allowPartialChunks) {
-        init(new HttpServerRequestDecoder(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders,
-                                          initialBufferSize, allowDuplicateContentLengths, allowPartialChunks),
-             new HttpServerResponseEncoder());
+        this(new HttpDecoderConfig()
+                .setMaxInitialLineLength(maxInitialLineLength)
+                .setMaxHeaderSize(maxHeaderSize)
+                .setMaxChunkSize(maxChunkSize)
+                .setValidateHeaders(validateHeaders)
+                .setInitialBufferSize(initialBufferSize)
+                .setAllowDuplicateContentLengths(allowDuplicateContentLengths)
+                .setAllowPartialChunks(allowPartialChunks));
+    }
+
+    /**
+     * Creates a new instance with the specified decoder configuration.
+     */
+    public HttpServerCodec(HttpDecoderConfig config) {
+        this(config, DEFAULT_MAX_PIPELINE_DEPTH);
+    }
+
+    /**
+     * Creates a new instance with the specified decoder configuration.
+     *
+     * @param config the decoder configuration.
+     * @param maxPipelineDepth the maximum number of requests that may be decoded while awaiting the
+     *                         corresponding responses to be written, before decoding of further requests
+     *                         is rejected with an {@link IllegalStateException}.
+     */
+    public HttpServerCodec(HttpDecoderConfig config, int maxPipelineDepth) {
+        this.maxPipelineDepth = ObjectUtil.checkPositive(maxPipelineDepth, "maxPipelineDepth");
+        init(new HttpServerRequestDecoder(config), new HttpServerResponseEncoder());
     }
 
     /**
@@ -104,53 +185,70 @@ public final class HttpServerCodec extends CombinedChannelDuplexHandler<HttpRequ
         ctx.pipeline().remove(this);
     }
 
+    private boolean enqueueMethod(HttpMethod method) {
+        int currentDepth = queue.size();
+        if (currentDepth >= maxPipelineDepth) {
+            return false;
+        }
+
+        queue.add(method);
+        return true;
+    }
+
     private final class HttpServerRequestDecoder extends HttpRequestDecoder {
+        private boolean discard;
 
-        HttpServerRequestDecoder(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize);
-        }
-
-        HttpServerRequestDecoder(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize,
-                                        boolean validateHeaders) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders);
-        }
-
-        HttpServerRequestDecoder(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize,
-
-                                        boolean validateHeaders, int initialBufferSize) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders, initialBufferSize);
-        }
-
-        HttpServerRequestDecoder(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize,
-                                 boolean validateHeaders, int initialBufferSize, boolean allowDuplicateContentLengths) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders, initialBufferSize,
-                  allowDuplicateContentLengths);
-        }
-
-        HttpServerRequestDecoder(int maxInitialLineLength, int maxHeaderSize, int maxChunkSize,
-                                 boolean validateHeaders, int initialBufferSize, boolean allowDuplicateContentLengths,
-                                 boolean allowPartialChunks) {
-            super(maxInitialLineLength, maxHeaderSize, maxChunkSize, validateHeaders, initialBufferSize,
-                  allowDuplicateContentLengths, allowPartialChunks);
+        HttpServerRequestDecoder(HttpDecoderConfig config) {
+            super(config);
         }
 
         @Override
         protected void decode(ChannelHandlerContext ctx, ByteBuf buffer, List<Object> out) throws Exception {
+            if (discard) {
+                buffer.skipBytes(buffer.readableBytes());
+                return;
+            }
             int oldSize = out.size();
             super.decode(ctx, buffer, out);
             int size = out.size();
             for (int i = oldSize; i < size; i++) {
                 Object obj = out.get(i);
                 if (obj instanceof HttpRequest) {
-                    queue.add(((HttpRequest) obj).method());
+                    if (!enqueueMethod(((HttpRequest) obj).method())) {
+                        // We hit the limit, let's discard everything and release everything and also ensure
+                        // we close the connection once the first response is written back.
+                        mustCloseAfterResponse = true;
+                        discard = true;
+                        ReferenceCountUtil.release(obj);
+                        while (++i < size) {
+                            ReferenceCountUtil.release(out.get(i));
+                        }
+                        out.clear();
+                        throw new IllegalStateException("maxPipelineDepth exceeded: " + maxPipelineDepth);
+                    }
                 }
             }
+        }
+
+        @Override
+        protected void handleTransferEncodingChunkedWithContentLength(HttpMessage message) {
+            super.handleTransferEncodingChunkedWithContentLength(message);
+            mustCloseAfterResponse = true;
         }
     }
 
     private final class HttpServerResponseEncoder extends HttpResponseEncoder {
 
         private HttpMethod method;
+
+        @Override
+        public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+            if (mustCloseAfterResponse && msg instanceof LastHttpContent) {
+                mustCloseAfterResponse = false;
+                promise = promise.unvoid().addListener(ChannelFutureListener.CLOSE);
+            }
+            super.write(ctx, msg, promise);
+        }
 
         @Override
         protected void sanitizeHeadersBeforeEncode(HttpResponse msg, boolean isAlwaysEmpty) {
@@ -167,6 +265,12 @@ public final class HttpServerCodec extends CombinedChannelDuplexHandler<HttpRequ
 
         @Override
         protected boolean isContentAlwaysEmpty(@SuppressWarnings("unused") HttpResponse msg) {
+            if (msg.status().codeClass() == HttpStatusClass.INFORMATIONAL) {
+                // An informational response should be excluded from paired comparison. This covers 101 as well:
+                // once the protocol is switched this handler is removed from the pipeline, so the entry that is
+                // left behind goes away with it. Just delegate to super method which has all the needed handling.
+                return super.isContentAlwaysEmpty(msg);
+            }
             method = queue.poll();
             return HttpMethod.HEAD.equals(method) || super.isContentAlwaysEmpty(msg);
         }

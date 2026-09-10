@@ -22,6 +22,7 @@ import io.netty.channel.EventLoopTaskQueueFactory;
 import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.SelectStrategyFactory;
 import io.netty.channel.SingleThreadEventLoop;
+import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.EventExecutorChooserFactory;
 import io.netty.util.concurrent.RejectedExecutionHandler;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
@@ -34,6 +35,9 @@ import java.util.concurrent.ThreadFactory;
  * it only works on linux.
  */
 public final class EpollEventLoopGroup extends MultithreadEventLoopGroup {
+
+    // This does not use static by design to ensure the class can be loaded and only do the check when its actually
+    // instanced.
     {
         // Ensure JNI is initialized by the time this class is loaded.
         Epoll.ensureAvailability();
@@ -158,12 +162,12 @@ public final class EpollEventLoopGroup extends MultithreadEventLoopGroup {
     }
 
     /**
-     * @deprecated This method will be removed in future releases, and is not guaranteed to have any impacts.
+     * Sets the percentage of the desired amount of time spent for I/O in the child event loops.  The default value is
+     * {@code 50}, which means the event loop will try to spend the same amount of time for I/O as for non-I/O tasks.
      */
-    @Deprecated
     public void setIoRatio(int ioRatio) {
-        if (ioRatio <= 0 || ioRatio > 100) {
-            throw new IllegalArgumentException("ioRatio: " + ioRatio + " (expected: 0 < ioRatio <= 100)");
+        for (EventExecutor e: this) {
+            ((EpollEventLoop) e).setIoRatio(ioRatio);
         }
     }
 

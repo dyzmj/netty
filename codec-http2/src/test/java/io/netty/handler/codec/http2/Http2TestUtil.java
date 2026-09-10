@@ -29,7 +29,6 @@ import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.ImmediateEventExecutor;
-import junit.framework.AssertionFailedError;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
@@ -44,6 +43,7 @@ import static io.netty.util.ReferenceCountUtil.release;
 import static java.lang.Math.min;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyByte;
@@ -57,6 +57,19 @@ import static org.mockito.Mockito.when;
  * Utilities for the integration tests.
  */
 public final class Http2TestUtil {
+    /**
+     * A fake exception that can be used in tests to simulate errors. The stack trace is not filled in to avoid
+     * unnecessary overhead.
+     */
+    static final RuntimeException FAKE_EXCEPTION = new RuntimeException("Fake exception") {
+        private static final long serialVersionUID = -8316972447187527869L;
+
+        @Override
+        public Throwable fillInStackTrace() {
+            return this;
+        }
+    };
+
     /**
      * Interface that allows for running a operation that throws a {@link Http2Exception}.
      */
@@ -277,13 +290,15 @@ public final class Http2TestUtil {
             @Override
             public ChannelPromise addListener(
                     GenericFutureListener<? extends Future<? super Void>> listener) {
-                throw new AssertionFailedError();
+                fail();
+                return null;
             }
 
             @Override
             public ChannelPromise addListeners(
                     GenericFutureListener<? extends Future<? super Void>>... listeners) {
-                throw new AssertionFailedError();
+                fail();
+                return null;
             }
 
             @Override

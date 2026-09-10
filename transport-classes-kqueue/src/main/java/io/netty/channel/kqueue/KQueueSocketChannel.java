@@ -18,22 +18,26 @@ package io.netty.channel.kqueue;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOutboundBuffer;
+import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.unix.IovArray;
 import io.netty.util.concurrent.GlobalEventExecutor;
-import io.netty.util.internal.UnstableApi;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.concurrent.Executor;
 
-@UnstableApi
 public final class KQueueSocketChannel extends AbstractKQueueStreamChannel implements SocketChannel {
     private final KQueueSocketChannelConfig config;
 
     public KQueueSocketChannel() {
         super(null, BsdSocket.newSocketStream(), false);
+        config = new KQueueSocketChannelConfig(this);
+    }
+
+    public KQueueSocketChannel(InternetProtocolFamily protocol) {
+        super(null, BsdSocket.newSocketStream(protocol), false);
         config = new KQueueSocketChannelConfig(this);
     }
 
@@ -112,7 +116,9 @@ public final class KQueueSocketChannel extends AbstractKQueueStreamChannel imple
                     // because we try to read or write until the actual close happens which may be later due
                     // SO_LINGER handling.
                     // See https://github.com/netty/netty/issues/4449
-                    ((KQueueEventLoop) eventLoop()).remove(KQueueSocketChannel.this);
+                    if (registration != null) {
+                        registration.remove();
+                    }
                     return GlobalEventExecutor.INSTANCE;
                 }
             } catch (Throwable ignore) {

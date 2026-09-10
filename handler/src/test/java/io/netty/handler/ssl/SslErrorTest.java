@@ -27,6 +27,7 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory;
@@ -38,11 +39,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import javax.net.ssl.ManagerFactoryParameters;
+import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
+import javax.net.ssl.X509ExtendedTrustManager;
 import javax.security.auth.x500.X500Principal;
 import java.io.File;
+import java.net.Socket;
 import java.security.KeyStore;
 import java.security.cert.CRLReason;
 import java.security.cert.CertPathValidatorException;
@@ -117,7 +120,7 @@ public class SslErrorTest {
         // no need to run it if there is no openssl is available at all.
         OpenSsl.ensureAvailability();
 
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
 
         SslContextBuilder sslServerCtxBuilder = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(serverProvider)
@@ -213,7 +216,31 @@ public class SslErrorTest {
 
         @Override
         protected TrustManager[] engineGetTrustManagers() {
-            return new TrustManager[] { new X509TrustManager() {
+            return new TrustManager[] { new X509ExtendedTrustManager() {
+
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType, Socket socket)
+                        throws CertificateException {
+                    throw exception;
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType, Socket socket)
+                        throws CertificateException {
+                    throw exception;
+                }
+
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType, SSLEngine engine)
+                        throws CertificateException {
+                    throw exception;
+                }
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType, SSLEngine engine)
+                        throws CertificateException {
+                    throw exception;
+                }
 
                 @Override
                 public void checkClientTrusted(X509Certificate[] x509Certificates, String s)

@@ -37,7 +37,7 @@
 
 // Those are initialized in the init(...) method and cached for performance reasons
 static jclass stringClass = NULL;
-static jclass peerCredentialsClass = NULL;
+static jweak peerCredentialsClassWeak = NULL;
 static jfieldID fileChannelFieldId = NULL;
 static jfieldID transferredFieldId = NULL;
 static jfieldID fdFieldId = NULL;
@@ -73,12 +73,17 @@ static jlong netty_kqueue_bsdsocket_sendFile(JNIEnv* env, jclass clazz, jint soc
       sbytes = 0;
       res = sendfile(srcFd, socketFd, base_off + off, len, NULL, &sbytes, 0);
 #endif
+      // BSD/macOS sendfile passes the offset by value (unlike Linux which takes off_t*).
+      // When interrupted (EINTR), sbytes reports how many bytes were sent before the signal.
+      // Advance off so the next iteration resumes from where we left off, not from the start.
+      off += sbytes;
       len -= sbytes;
     } while (res < 0 && ((err = errno) == EINTR));
     sbytes = lenBefore - len;
     if (sbytes > 0) {
         // update the transferred field in DefaultFileRegion
-        (*env)->SetLongField(env, fileRegion, transferredFieldId, off + sbytes);
+        // off has already been advanced by sbytes inside the loop, so it equals the new total.
+        (*env)->SetLongField(env, fileRegion, transferredFieldId, off);
         return sbytes;
     }
     return res < 0 ? -err : 0;
@@ -144,12 +149,36 @@ static void netty_kqueue_bsdsocket_setAcceptFilter(JNIEnv* env, jclass clazz, ji
     const char* tmpString = NULL;
     af.af_name[0] = af.af_arg[0] ='\0';
 
+    jsize len = (*env)->GetStringUTFLength(env, afName);
+    if (len > sizeof(af.af_name)) {
+         // Too large and so can't be stored
+        netty_unix_errors_throwChannelExceptionErrorNo(env, "setsockopt() failed: ", EOVERFLOW);
+        return;
+    }
     tmpString = (*env)->GetStringUTFChars(env, afName, NULL);
-    strncat(af.af_name, tmpString, sizeof(af.af_name) / sizeof(af.af_name[0]));
+    if (tmpString == NULL) {
+       // if NULL is returned it failed due OOME
+       netty_unix_errors_throwChannelExceptionErrorNo(env, "setsockopt() failed: ", ENOMEM);
+       return;
+    }
+
+    strlcat(af.af_name, tmpString, sizeof(af.af_name));
     (*env)->ReleaseStringUTFChars(env, afName, tmpString);
 
+    len = (*env)->GetStringUTFLength(env, afArg);
+    if (len > sizeof(af.af_arg)) {
+         // Too large and so can't be stored
+        netty_unix_errors_throwChannelExceptionErrorNo(env, "setsockopt() failed: ", EOVERFLOW);
+        return;
+    }
+
     tmpString = (*env)->GetStringUTFChars(env, afArg, NULL);
-    strncat(af.af_arg, tmpString, sizeof(af.af_arg) / sizeof(af.af_arg[0]));
+    if (tmpString == NULL) {
+        // if NULL is returned it failed due OOME
+        netty_unix_errors_throwChannelExceptionErrorNo(env, "setsockopt() failed: ", ENOMEM);
+        return;
+    }
+    strlcat(af.af_arg, tmpString, sizeof(af.af_arg));
     (*env)->ReleaseStringUTFChars(env, afArg, tmpString);
 
     netty_unix_socket_setOption(env, fd, SOL_SOCKET, SO_ACCEPTFILTER, &af, sizeof(af));
@@ -225,6 +254,8 @@ static jint netty_kqueue_bsdsocket_isTcpFastOpen(JNIEnv* env, jclass clazz, jint
 
 static jobject netty_kqueue_bsdsocket_getPeerCredentials(JNIEnv *env, jclass clazz, jint fd) {
     struct xucred credentials;
+    jclass peerCredentialsClass = NULL;
+
     // It has been observed on MacOS that this method can complete successfully but not set all fields of xucred.
     credentials.cr_ngroups = 0;
     if(netty_unix_socket_getOption(env,fd, SOL_SOCKET, LOCAL_PEERCRED, &credentials, sizeof (credentials)) == -1) {
@@ -248,12 +279,18 @@ static jobject netty_kqueue_bsdsocket_getPeerCredentials(JNIEnv *env, jclass cla
 #ifdef LOCAL_PEERPID
     socklen_t len = sizeof(pid);
     // Getting the LOCAL_PEERPID is expected to return error in some cases (e.g. server socket FDs) - just return 0.
-    if (netty_unix_socket_getOption0(fd, SOCK_STREAM, LOCAL_PEERPID, &pid, len) < 0) {
+    if (netty_unix_socket_getOption0(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, len) < 0) {
         pid = 0;
     }
 #endif
 
-    return (*env)->NewObject(env, peerCredentialsClass, peerCredentialsMethodId, pid, credentials.cr_uid, gids);
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, peerCredentialsClass, peerCredentialsClassWeak, error);
+
+    jobject creds = (*env)->NewObject(env, peerCredentialsClass, peerCredentialsMethodId, pid, credentials.cr_uid, gids);
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, peerCredentialsClass);
+    return creds;
+ error:
+    return NULL;
 }
 // JNI Registered Methods End
 
@@ -317,6 +354,7 @@ jint netty_kqueue_bsdsocket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     jclass fileRegionCls = NULL;
     jclass fileChannelCls = NULL;
     jclass fileDescriptorCls = NULL;
+    jclass peerCredentialsClass = NULL;
     // Register the methods which are not referenced by static member variables
     JNINativeMethod* dynamicMethods = createDynamicMethodsTable(packagePrefix);
     if (dynamicMethods == NULL) {
@@ -347,7 +385,9 @@ jint netty_kqueue_bsdsocket_JNI_OnLoad(JNIEnv* env, const char* packagePrefix) {
     NETTY_JNI_UTIL_LOAD_CLASS(env, stringClass, "java/lang/String", done);
 
     NETTY_JNI_UTIL_PREPEND(packagePrefix, "io/netty/channel/unix/PeerCredentials", nettyClassName, done);
-    NETTY_JNI_UTIL_LOAD_CLASS(env, peerCredentialsClass, nettyClassName, done);
+
+    NETTY_JNI_UTIL_LOAD_CLASS_WEAK(env, peerCredentialsClassWeak, nettyClassName, done);
+    NETTY_JNI_UTIL_NEW_LOCAL_FROM_WEAK(env, peerCredentialsClass, peerCredentialsClassWeak, done);
     netty_jni_util_free_dynamic_name(&nettyClassName);
   
     NETTY_JNI_UTIL_GET_METHOD(env, peerCredentialsClass, peerCredentialsMethodId, "<init>", "(II[I)V", done);
@@ -356,11 +396,13 @@ done:
     netty_jni_util_free_dynamic_methods_table(dynamicMethods, fixed_method_table_size, dynamicMethodsTableSize());
     free(nettyClassName);
 
+    NETTY_JNI_UTIL_DELETE_LOCAL(env, peerCredentialsClass);
+
     return ret;
 }
 
 void netty_kqueue_bsdsocket_JNI_OnUnLoad(JNIEnv* env, const char* packagePrefix) {
-    NETTY_JNI_UTIL_UNLOAD_CLASS(env, peerCredentialsClass);
+    NETTY_JNI_UTIL_UNLOAD_CLASS_WEAK(env, peerCredentialsClassWeak);
     NETTY_JNI_UTIL_UNLOAD_CLASS(env, stringClass);
 
     netty_jni_util_unregister_natives(env, packagePrefix, BSDSOCKET_CLASSNAME);

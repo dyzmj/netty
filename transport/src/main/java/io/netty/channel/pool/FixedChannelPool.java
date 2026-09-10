@@ -421,7 +421,11 @@ public class FixedChannelPool extends SimpleChannelPool {
                 }
 
                 if (future.isSuccess()) {
-                    originalPromise.setSuccess(future.getNow());
+                    Channel channel = future.getNow();
+                    if (!originalPromise.trySuccess(channel)) {
+                        // Promise was completed in the meantime (like cancelled), just release the channel again.
+                        release(channel);
+                    }
                 } else {
                     if (acquired) {
                         decrementAndRunTaskQueue();
@@ -526,7 +530,7 @@ public class FixedChannelPool extends SimpleChannelPool {
 
         // Suppress a warning since the method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }

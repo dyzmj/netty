@@ -15,8 +15,7 @@
  */
 package io.netty.handler.codec.http;
 
-import io.netty.util.internal.ObjectUtil;
-
+import static io.netty.handler.codec.http.DefaultHttpHeadersFactory.headersFactory;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 /**
@@ -26,6 +25,7 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
     private static final int HASH_CODE_PRIME = 31;
     private HttpMethod method;
     private String uri;
+    private final boolean validateRequestLine;
 
     /**
      * Creates a new instance.
@@ -35,7 +35,7 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
      * @param uri         the URI or path of the request
      */
     public DefaultHttpRequest(HttpVersion httpVersion, HttpMethod method, String uri) {
-        this(httpVersion, method, uri, true);
+        this(httpVersion, method, uri, headersFactory().newHeaders());
     }
 
     /**
@@ -45,11 +45,26 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
      * @param method            the HTTP method of the request
      * @param uri               the URI or path of the request
      * @param validateHeaders   validate the header names and values when adding them to the {@link HttpHeaders}
+     * @deprecated Prefer the {@link #DefaultHttpRequest(HttpVersion, HttpMethod, String)} constructor instead,
+     * to always have header validation enabled.
      */
+    @Deprecated
     public DefaultHttpRequest(HttpVersion httpVersion, HttpMethod method, String uri, boolean validateHeaders) {
-        super(httpVersion, validateHeaders, false);
-        this.method = checkNotNull(method, "method");
-        this.uri = checkNotNull(uri, "uri");
+        this(httpVersion, method, uri, headersFactory().withValidation(validateHeaders));
+    }
+
+    /**
+     * Creates a new instance.
+     *
+     * @param httpVersion       the HTTP version of the request
+     * @param method            the HTTP method of the request
+     * @param uri               the URI or path of the request
+     * @param headersFactory    the {@link HttpHeadersFactory} used to create the headers for this Request.
+     * The recommended default is {@link DefaultHttpHeadersFactory#headersFactory()}.
+     */
+    public DefaultHttpRequest(HttpVersion httpVersion, HttpMethod method, String uri,
+                              HttpHeadersFactory headersFactory) {
+        this(httpVersion, method, uri, headersFactory.newHeaders());
     }
 
     /**
@@ -61,9 +76,26 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
      * @param headers           the Headers for this Request
      */
     public DefaultHttpRequest(HttpVersion httpVersion, HttpMethod method, String uri, HttpHeaders headers) {
+        this(httpVersion, method, uri, headers, true);
+    }
+
+    /**
+     * Creates a new instance.
+     *
+     * @param httpVersion       the HTTP version of the request
+     * @param method            the HTTP method of the request
+     * @param uri               the URI or path of the request
+     * @param headers           the Headers for this Request
+     */
+    public DefaultHttpRequest(HttpVersion httpVersion, HttpMethod method, String uri, HttpHeaders headers,
+                              boolean validateRequestLine) {
         super(httpVersion, headers);
         this.method = checkNotNull(method, "method");
         this.uri = checkNotNull(uri, "uri");
+        this.validateRequestLine = validateRequestLine;
+        if (validateRequestLine) {
+            HttpUtil.validateRequestLineTokens(method, uri);
+        }
     }
 
     @Override
@@ -90,13 +122,21 @@ public class DefaultHttpRequest extends DefaultHttpMessage implements HttpReques
 
     @Override
     public HttpRequest setMethod(HttpMethod method) {
-        this.method = ObjectUtil.checkNotNull(method, "method");
+        checkNotNull(method, "method");
+        if (validateRequestLine) {
+            HttpUtil.validateRequestLineTokens(method, uri);
+        }
+        this.method = method;
         return this;
     }
 
     @Override
     public HttpRequest setUri(String uri) {
-        this.uri = ObjectUtil.checkNotNull(uri, "uri");
+        checkNotNull(uri, "uri");
+        if (validateRequestLine) {
+            HttpUtil.validateRequestLineTokens(method, uri);
+        }
+        this.uri = uri;
         return this;
     }
 

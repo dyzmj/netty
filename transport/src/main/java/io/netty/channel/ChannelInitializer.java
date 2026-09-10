@@ -128,13 +128,12 @@ public abstract class ChannelInitializer<C extends Channel> extends ChannelInbou
             try {
                 initChannel((C) ctx.channel());
             } catch (Throwable cause) {
-                // Explicitly call exceptionCaught(...) as we removed the handler before calling initChannel(...).
-                // We do so to prevent multiple calls to initChannel(...).
+                // Explicitly route the failure into the pipeline. Re-entrance is guarded by
+                // the initMap.add(ctx) check above; the finally block below removes the handler.
                 exceptionCaught(ctx, cause);
             } finally {
-                ChannelPipeline pipeline = ctx.pipeline();
-                if (pipeline.context(this) != null) {
-                    pipeline.remove(this);
+                if (!ctx.isRemoved()) {
+                    ctx.pipeline().remove(this);
                 }
             }
             return true;

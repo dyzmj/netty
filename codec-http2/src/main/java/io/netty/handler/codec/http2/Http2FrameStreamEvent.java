@@ -15,15 +15,12 @@
  */
 package io.netty.handler.codec.http2;
 
-import io.netty.util.internal.UnstableApi;
-
-@UnstableApi
 public final class Http2FrameStreamEvent {
 
     private final Http2FrameStream stream;
     private final Type type;
 
-    enum Type {
+    public enum Type {
         State,
         Writability
     }

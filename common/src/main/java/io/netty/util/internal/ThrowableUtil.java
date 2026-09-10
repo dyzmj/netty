@@ -76,4 +76,27 @@ public final class ThrowableUtil {
             addSuppressed(target, t);
         }
     }
+
+    @SuppressJava6Requirement(reason = "Throwable getSuppressed is only available for >= 7. Has check for < 7.")
+    public static Throwable[] getSuppressed(Throwable source) {
+        if (!haveSuppressed()) {
+            return EmptyArrays.EMPTY_THROWABLES;
+        }
+        return source.getSuppressed();
+    }
+
+    /**
+     * Capture the stack trace of the given thread, interrupt it, and attach the stack trace as a suppressed exception
+     * to the given cause.
+     * @param thread The thread to interrupt.
+     * @param cause The cause to attach a stack trace to.
+     */
+    public static void interruptAndAttachAsyncStackTrace(Thread thread, Throwable cause) {
+        StackTraceElement[] stackTrace = thread.getStackTrace();
+        InterruptedException asyncIE = new InterruptedException(
+                "Asynchronous interruption: " + thread);
+        thread.interrupt();
+        asyncIE.setStackTrace(stackTrace);
+        addSuppressed(cause, asyncIE);
+    }
 }

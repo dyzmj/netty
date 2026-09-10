@@ -36,6 +36,7 @@ import io.netty.channel.local.LocalServerChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory;
@@ -47,6 +48,8 @@ import io.netty.util.concurrent.Promise;
 import io.netty.util.concurrent.PromiseNotifier;
 import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.ResourcesUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -129,7 +132,7 @@ public class ParameterizedSslHandlerTest {
             final boolean serverDisableWrapSize,
             final boolean letHandlerCreateServerEngine, final boolean letHandlerCreateClientEngine)
             throws CertificateException, SSLException, ExecutionException, InterruptedException {
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
 
         final SslContext sslServerCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(serverProvider)
@@ -273,7 +276,6 @@ public class ParameterizedSslHandlerTest {
 
             ReferenceCountUtil.release(sslServerCtx);
             ReferenceCountUtil.release(sslClientCtx);
-            ssc.delete();
         }
     }
 
@@ -281,7 +283,7 @@ public class ParameterizedSslHandlerTest {
     @MethodSource("data")
     @Timeout(value = 30000, unit = TimeUnit.MILLISECONDS)
     public void testAlertProducedAndSend(SslProvider clientProvider, SslProvider serverProvider) throws Exception {
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
 
         final SslContext sslServerCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(serverProvider)
@@ -402,7 +404,7 @@ public class ParameterizedSslHandlerTest {
 
     private void testCloseNotify(SslProvider clientProvider, SslProvider serverProvider,
                                  final long closeNotifyReadTimeout, final boolean timeout) throws Exception {
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
 
         final SslContext sslServerCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                                                          .sslProvider(serverProvider)
@@ -568,7 +570,7 @@ public class ParameterizedSslHandlerTest {
                                             Class<? extends ServerChannel> serverClass,
                                             Class<? extends Channel> clientClass, boolean serverAutoRead,
                                             boolean clientAutoRead) throws Exception {
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
         final SslContext sslServerCtx = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(serverProvider)
                 .build();
@@ -636,6 +638,8 @@ public class ParameterizedSslHandlerTest {
     }
 
     private static final class ReentryWriteSslHandshakeHandler extends SimpleChannelInboundHandler<ByteBuf> {
+        private static final InternalLogger LOGGER =
+                InternalLoggerFactory.getInstance(ReentryWriteSslHandshakeHandler.class);
         private final String toWrite;
         private final StringBuilder readQueue;
         private final CountDownLatch doneLatch;
@@ -681,6 +685,7 @@ public class ParameterizedSslHandlerTest {
         }
 
         private void appendError(Throwable cause) {
+            LOGGER.error(new Exception("Caught possible write failure in ParameterizedSslHandlerTest.", cause));
             readQueue.append("failed to write '").append(toWrite).append("': ");
 
             ByteArrayOutputStream out = new ByteArrayOutputStream();

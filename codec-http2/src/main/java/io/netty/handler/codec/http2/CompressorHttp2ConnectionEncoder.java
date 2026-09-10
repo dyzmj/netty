@@ -24,16 +24,22 @@ import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.compression.BrotliEncoder;
 import io.netty.handler.codec.compression.ZlibCodecFactory;
 import io.netty.handler.codec.compression.ZlibWrapper;
+import io.netty.handler.codec.compression.Brotli;
 import io.netty.handler.codec.compression.BrotliOptions;
 import io.netty.handler.codec.compression.CompressionOptions;
 import io.netty.handler.codec.compression.DeflateOptions;
 import io.netty.handler.codec.compression.GzipOptions;
 import io.netty.handler.codec.compression.StandardCompressionOptions;
+import io.netty.handler.codec.compression.Zstd;
 import io.netty.handler.codec.compression.ZstdEncoder;
 import io.netty.handler.codec.compression.ZstdOptions;
+import io.netty.handler.codec.compression.SnappyFrameEncoder;
+import io.netty.handler.codec.compression.SnappyOptions;
 import io.netty.util.concurrent.PromiseCombiner;
 import io.netty.util.internal.ObjectUtil;
-import io.netty.util.internal.UnstableApi;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_ENCODING;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
@@ -44,12 +50,12 @@ import static io.netty.handler.codec.http.HttpHeaderValues.IDENTITY;
 import static io.netty.handler.codec.http.HttpHeaderValues.X_DEFLATE;
 import static io.netty.handler.codec.http.HttpHeaderValues.X_GZIP;
 import static io.netty.handler.codec.http.HttpHeaderValues.ZSTD;
+import static io.netty.handler.codec.http.HttpHeaderValues.SNAPPY;
 
 /**
  * A decorating HTTP2 encoder that will compress data frames according to the {@code content-encoding} header for each
  * stream. The compression provided by this class will be applied to the data for the entire stream.
  */
-@UnstableApi
 public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionEncoder {
     // We cannot remove this because it'll be breaking change
     public static final int DEFAULT_COMPRESSION_LEVEL = 6;
@@ -67,14 +73,28 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
     private GzipOptions gzipCompressionOptions;
     private DeflateOptions deflateOptions;
     private ZstdOptions zstdOptions;
+    private SnappyOptions snappyOptions;
 
     /**
      * Create a new {@link CompressorHttp2ConnectionEncoder} instance
      * with default implementation of {@link StandardCompressionOptions}
      */
     public CompressorHttp2ConnectionEncoder(Http2ConnectionEncoder delegate) {
-        this(delegate, StandardCompressionOptions.brotli(), StandardCompressionOptions.gzip(),
-                StandardCompressionOptions.deflate());
+        this(delegate, defaultCompressionOptions());
+    }
+
+    private static CompressionOptions[] defaultCompressionOptions() {
+        List<CompressionOptions> compressionOptions = new ArrayList<CompressionOptions>();
+        compressionOptions.add(StandardCompressionOptions.gzip());
+        compressionOptions.add(StandardCompressionOptions.deflate());
+        compressionOptions.add(StandardCompressionOptions.snappy());
+        if (Brotli.isAvailable()) {
+            compressionOptions.add(StandardCompressionOptions.brotli());
+        }
+        if (Zstd.isAvailable()) {
+            compressionOptions.add(StandardCompressionOptions.zstd());
+        }
+        return compressionOptions.toArray(new CompressionOptions[0]);
     }
 
     /**
@@ -113,7 +133,13 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
         ObjectUtil.deepCheckNotNull("CompressionOptions", compressionOptionsArgs);
 
         for (CompressionOptions compressionOptions : compressionOptionsArgs) {
-            if (compressionOptions instanceof BrotliOptions) {
+            // BrotliOptions' class initialization depends on Brotli classes being on the classpath.
+            // The Brotli.isAvailable check ensures that BrotliOptions will only get instantiated if Brotli is on
+            // the classpath.
+            // This results in the static analysis of native-image identifying the instanceof BrotliOptions check
+            // and thus BrotliOptions itself as unreachable, enabling native-image to link all classes at build time
+            // and not complain about the missing Brotli classes.
+            if (Brotli.isAvailable() && compressionOptions instanceof BrotliOptions) {
                 brotliOptions = (BrotliOptions) compressionOptions;
             } else if (compressionOptions instanceof GzipOptions) {
                 gzipCompressionOptions = (GzipOptions) compressionOptions;
@@ -121,6 +147,8 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
                 deflateOptions = (DeflateOptions) compressionOptions;
             } else if (compressionOptions instanceof ZstdOptions) {
                 zstdOptions = (ZstdOptions) compressionOptions;
+            } else if (compressionOptions instanceof SnappyOptions) {
+                snappyOptions = (SnappyOptions) compressionOptions;
             } else {
                 throw new IllegalArgumentException("Unsupported " + CompressionOptions.class.getSimpleName() +
                         ": " + compressionOptions);
@@ -201,19 +229,26 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
     @Override
     public ChannelFuture writeHeaders(ChannelHandlerContext ctx, int streamId, Http2Headers headers, int padding,
             boolean endStream, ChannelPromise promise) {
+        EmbeddedChannel compressor = null;
         try {
             // Determine if compression is required and sanitize the headers.
-            EmbeddedChannel compressor = newCompressor(ctx, headers, endStream);
+            compressor = newCompressor(ctx, headers, endStream);
 
             // Write the headers and create the stream object.
             ChannelFuture future = super.writeHeaders(ctx, streamId, headers, padding, endStream, promise);
 
             // After the stream object has been created, then attach the compressor as a property for data compression.
-            bindCompressorToStream(compressor, streamId);
+            if (bindCompressorToStream(compressor, streamId)) {
+                compressor = null;
+            }
 
             return future;
         } catch (Throwable e) {
             promise.tryFailure(e);
+        } finally {
+            if (compressor != null) {
+                compressor.finishAndReleaseAll();
+            }
         }
         return promise;
     }
@@ -222,20 +257,27 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
     public ChannelFuture writeHeaders(final ChannelHandlerContext ctx, final int streamId, final Http2Headers headers,
             final int streamDependency, final short weight, final boolean exclusive, final int padding,
             final boolean endOfStream, final ChannelPromise promise) {
+        EmbeddedChannel compressor = null;
         try {
             // Determine if compression is required and sanitize the headers.
-            EmbeddedChannel compressor = newCompressor(ctx, headers, endOfStream);
+            compressor = newCompressor(ctx, headers, endOfStream);
 
             // Write the headers and create the stream object.
             ChannelFuture future = super.writeHeaders(ctx, streamId, headers, streamDependency, weight, exclusive,
                                                       padding, endOfStream, promise);
 
             // After the stream object has been created, then attach the compressor as a property for data compression.
-            bindCompressorToStream(compressor, streamId);
+            if (bindCompressorToStream(compressor, streamId)) {
+                compressor = null;
+            }
 
             return future;
         } catch (Throwable e) {
             promise.tryFailure(e);
+        } finally {
+            if (compressor != null) {
+                compressor.finishAndReleaseAll();
+            }
         }
         return promise;
     }
@@ -248,7 +290,7 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
      * @param contentEncoding the value of the {@code content-encoding} header
      * @return a new {@link ByteToMessageDecoder} if the specified encoding is supported. {@code null} otherwise
      * (alternatively, you can throw a {@link Http2Exception} to block unknown encoding).
-     * @throws Http2Exception If the specified encoding is not not supported and warrants an exception
+     * @throws Http2Exception If the specified encoding is not supported and warrants an exception
      */
     protected EmbeddedChannel newContentCompressor(ChannelHandlerContext ctx, CharSequence contentEncoding)
             throws Http2Exception {
@@ -258,7 +300,7 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
         if (DEFLATE.contentEqualsIgnoreCase(contentEncoding) || X_DEFLATE.contentEqualsIgnoreCase(contentEncoding)) {
             return newCompressionChannel(ctx, ZlibWrapper.ZLIB);
         }
-        if (brotliOptions != null && BR.contentEqualsIgnoreCase(contentEncoding)) {
+        if (Brotli.isAvailable() && brotliOptions != null && BR.contentEqualsIgnoreCase(contentEncoding)) {
             return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
                     ctx.channel().config(), new BrotliEncoder(brotliOptions.parameters()));
         }
@@ -266,6 +308,10 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
             return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
                     ctx.channel().config(), new ZstdEncoder(zstdOptions.compressionLevel(),
                     zstdOptions.blockSize(), zstdOptions.maxEncodeSize()));
+        }
+        if (snappyOptions != null && SNAPPY.contentEqualsIgnoreCase(contentEncoding)) {
+            return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
+                    ctx.channel().config(), new SnappyFrameEncoder());
         }
         // 'identity' or unsupported
         return null;
@@ -330,36 +376,47 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
         if (encoding == null) {
             encoding = IDENTITY;
         }
-        final EmbeddedChannel compressor = newContentCompressor(ctx, encoding);
-        if (compressor != null) {
-            CharSequence targetContentEncoding = getTargetContentEncoding(encoding);
-            if (IDENTITY.contentEqualsIgnoreCase(targetContentEncoding)) {
-                headers.remove(CONTENT_ENCODING);
-            } else {
-                headers.set(CONTENT_ENCODING, targetContentEncoding);
+        EmbeddedChannel compressor = newContentCompressor(ctx, encoding);
+        try {
+            if (compressor != null) {
+                CharSequence targetContentEncoding = getTargetContentEncoding(encoding);
+                if (IDENTITY.contentEqualsIgnoreCase(targetContentEncoding)) {
+                    headers.remove(CONTENT_ENCODING);
+                } else {
+                    headers.set(CONTENT_ENCODING, targetContentEncoding);
+                }
+
+                // The content length will be for the decompressed data. Since we will compress the data
+                // this content-length will not be correct. Instead of queuing messages or delaying sending
+                // header frames...just remove the content-length header
+                headers.remove(CONTENT_LENGTH);
             }
 
-            // The content length will be for the decompressed data. Since we will compress the data
-            // this content-length will not be correct. Instead of queuing messages or delaying sending
-            // header frames...just remove the content-length header
-            headers.remove(CONTENT_LENGTH);
+            EmbeddedChannel result = compressor;
+            compressor = null;
+            return result;
+        } finally {
+            if (compressor != null) {
+                compressor.finishAndReleaseAll();
+            }
         }
-
-        return compressor;
     }
 
     /**
      * Called after the super class has written the headers and created any associated stream objects.
      * @param compressor The compressor associated with the stream identified by {@code streamId}.
      * @param streamId The stream id for which the headers were written.
+     * @return {@code true} if ownership of {@code compressor} was transferred to the stream.
      */
-    private void bindCompressorToStream(EmbeddedChannel compressor, int streamId) {
+    private boolean bindCompressorToStream(EmbeddedChannel compressor, int streamId) {
         if (compressor != null) {
             Http2Stream stream = connection().stream(streamId);
             if (stream != null) {
                 stream.setProperty(propertyKey, compressor);
+                return true;
             }
         }
+        return false;
     }
 
     /**

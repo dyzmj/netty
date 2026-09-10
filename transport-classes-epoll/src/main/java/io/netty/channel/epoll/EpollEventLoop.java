@@ -15,6 +15,7 @@
  */
 package io.netty.channel.epoll;
 
+import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.EventLoopTaskQueueFactory;
@@ -29,10 +30,13 @@ import io.netty.util.collection.IntObjectMap;
 import io.netty.util.concurrent.RejectedExecutionHandler;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.SystemPropertyUtil;
+import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
+import java.util.Iterator;
 import java.util.Queue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,8 +46,10 @@ import static java.lang.Math.min;
 /**
  * {@link EventLoop} which uses epoll under the covers. Only works on Linux!
  */
-class EpollEventLoop extends SingleThreadEventLoop {
+public class EpollEventLoop extends SingleThreadEventLoop {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(EpollEventLoop.class);
+    private static final long EPOLL_WAIT_MILLIS_THRESHOLD =
+            SystemPropertyUtil.getLong("io.netty.channel.epoll.epollWaitThreshold", 10);
 
     static {
         // Ensure JNI is initialized by the time this class is loaded by this time!
@@ -51,9 +57,9 @@ class EpollEventLoop extends SingleThreadEventLoop {
         Epoll.ensureAvailability();
     }
 
-    private final FileDescriptor epollFd;
-    private final FileDescriptor eventFd;
-    private final FileDescriptor timerFd;
+    private FileDescriptor epollFd;
+    private FileDescriptor eventFd;
+    private FileDescriptor timerFd;
     private final IntObjectMap<AbstractEpollChannel> channels = new IntObjectHashMap<AbstractEpollChannel>(4096);
     private final boolean allowGrowing;
     private final EpollEventArray events;
@@ -97,6 +103,15 @@ class EpollEventLoop extends SingleThreadEventLoop {
             allowGrowing = false;
             events = new EpollEventArray(maxEvents);
         }
+        openFileDescriptors();
+    }
+
+    /**
+     * This method is intended for use by a process checkpoint/restore
+     * integration, such as OpenJDK CRaC.
+     */
+    @UnstableApi
+    public void openFileDescriptors() {
         boolean success = false;
         FileDescriptor epollFd = null;
         FileDescriptor eventFd = null;
@@ -122,27 +137,19 @@ class EpollEventLoop extends SingleThreadEventLoop {
             success = true;
         } finally {
             if (!success) {
-                if (epollFd != null) {
-                    try {
-                        epollFd.close();
-                    } catch (Exception e) {
-                        // ignore
-                    }
-                }
-                if (eventFd != null) {
-                    try {
-                        eventFd.close();
-                    } catch (Exception e) {
-                        // ignore
-                    }
-                }
-                if (timerFd != null) {
-                    try {
-                        timerFd.close();
-                    } catch (Exception e) {
-                        // ignore
-                    }
-                }
+                closeFileDescriptor(epollFd);
+                closeFileDescriptor(eventFd);
+                closeFileDescriptor(timerFd);
+            }
+        }
+    }
+
+    private static void closeFileDescriptor(FileDescriptor fd) {
+        if (fd != null) {
+            try {
+                fd.close();
+            } catch (Exception e) {
+                // ignore
             }
         }
     }
@@ -276,14 +283,25 @@ class EpollEventLoop extends SingleThreadEventLoop {
         return channels.size();
     }
 
-    private int epollWait(long deadlineNanos) throws IOException {
+    @Override
+    public Iterator<Channel> registeredChannelsIterator() {
+        assert inEventLoop();
+        IntObjectMap<AbstractEpollChannel> ch = channels;
+        if (ch.isEmpty()) {
+            return ChannelsReadOnlyIterator.empty();
+        }
+        return new ChannelsReadOnlyIterator<AbstractEpollChannel>(ch.values());
+    }
+
+    private long epollWait(long deadlineNanos) throws IOException {
         if (deadlineNanos == NONE) {
-            return Native.epollWait(epollFd, events, timerFd, Integer.MAX_VALUE, 0); // disarm timer
+            return Native.epollWait(epollFd, events, timerFd,
+                    Integer.MAX_VALUE, 0, EPOLL_WAIT_MILLIS_THRESHOLD); // disarm timer
         }
         long totalDelay = deadlineToDelayNanos(deadlineNanos);
         int delaySeconds = (int) min(totalDelay / 1000000000L, Integer.MAX_VALUE);
         int delayNanos = (int) min(totalDelay - delaySeconds * 1000000000L, MAX_SCHEDULED_TIMERFD_NS);
-        return Native.epollWait(epollFd, events, timerFd, delaySeconds, delayNanos);
+        return Native.epollWait(epollFd, events, timerFd, delaySeconds, delayNanos, EPOLL_WAIT_MILLIS_THRESHOLD);
     }
 
     private int epollWaitNoTimerChange() throws IOException {
@@ -347,8 +365,11 @@ class EpollEventLoop extends SingleThreadEventLoop {
                                     strategy = epollWaitNoTimerChange();
                                 } else {
                                     // Timerfd needs to be re-armed or disarmed
-                                    prevDeadlineNanos = curDeadlineNanos;
-                                    strategy = epollWait(curDeadlineNanos);
+                                    long result = epollWait(curDeadlineNanos);
+                                    // The result contains the actual return value and if a timer was used or not.
+                                    // We need to "unpack" using the helper methods exposed in Native.
+                                    strategy = Native.epollReady(result);
+                                    prevDeadlineNanos = Native.epollTimerWasUsed(result) ? curDeadlineNanos : NONE;
                                 }
                             }
                         } finally {
@@ -505,40 +526,7 @@ class EpollEventLoop extends SingleThreadEventLoop {
     @Override
     protected void cleanup() {
         try {
-            // Ensure any in-flight wakeup writes have been performed prior to closing eventFd.
-            while (pendingWakeup) {
-                try {
-                    int count = epollWaitTimeboxed();
-                    if (count == 0) {
-                        // We timed-out so assume that the write we're expecting isn't coming
-                        break;
-                    }
-                    for (int i = 0; i < count; i++) {
-                        if (events.fd(i) == eventFd.intValue()) {
-                            pendingWakeup = false;
-                            break;
-                        }
-                    }
-                } catch (IOException ignore) {
-                    // ignore
-                }
-            }
-            try {
-                eventFd.close();
-            } catch (IOException e) {
-                logger.warn("Failed to close the event fd.", e);
-            }
-            try {
-                timerFd.close();
-            } catch (IOException e) {
-                logger.warn("Failed to close the timer fd.", e);
-            }
-
-            try {
-                epollFd.close();
-            } catch (IOException e) {
-                logger.warn("Failed to close the epoll fd.", e);
-            }
+            closeFileDescriptors();
         } finally {
             // release native memory
             if (iovArray != null) {
@@ -550,6 +538,50 @@ class EpollEventLoop extends SingleThreadEventLoop {
                 datagramPacketArray = null;
             }
             events.free();
+        }
+    }
+
+    /**
+     * This method is intended for use by process checkpoint/restore
+     * integration, such as OpenJDK CRaC.
+     * It's up to the caller to ensure that there is no concurrent use
+     * of the FDs while these are closed, e.g. by blocking the executor.
+     */
+    @UnstableApi
+    public void closeFileDescriptors() {
+        // Ensure any in-flight wakeup writes have been performed prior to closing eventFd.
+        while (pendingWakeup) {
+            try {
+                int count = epollWaitTimeboxed();
+                if (count == 0) {
+                    // We timed-out so assume that the write we're expecting isn't coming
+                    break;
+                }
+                for (int i = 0; i < count; i++) {
+                    if (events.fd(i) == eventFd.intValue()) {
+                        pendingWakeup = false;
+                        break;
+                    }
+                }
+            } catch (IOException ignore) {
+                // ignore
+            }
+        }
+        try {
+            eventFd.close();
+        } catch (IOException e) {
+            logger.warn("Failed to close the event fd.", e);
+        }
+        try {
+            timerFd.close();
+        } catch (IOException e) {
+            logger.warn("Failed to close the timer fd.", e);
+        }
+
+        try {
+            epollFd.close();
+        } catch (IOException e) {
+            logger.warn("Failed to close the epoll fd.", e);
         }
     }
 }

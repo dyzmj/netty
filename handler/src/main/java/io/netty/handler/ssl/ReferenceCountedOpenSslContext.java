@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.handler.ssl.util.LazyX509Certificate;
 import io.netty.internal.tcnative.AsyncSSLPrivateKeyMethod;
+import io.netty.internal.tcnative.CertificateCompressionAlgo;
 import io.netty.internal.tcnative.CertificateVerifier;
 import io.netty.internal.tcnative.ResultCallback;
 import io.netty.internal.tcnative.SSL;
@@ -31,6 +32,8 @@ import io.netty.util.ResourceLeakDetectorFactory;
 import io.netty.util.ResourceLeakTracker;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.ImmediateExecutor;
+import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.SuppressJava6Requirement;
@@ -48,10 +51,13 @@ import java.security.cert.CertificateNotYetValidException;
 import java.security.cert.CertificateRevokedException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
@@ -108,15 +114,13 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
     static final boolean SERVER_ENABLE_SESSION_TICKET =
             SystemPropertyUtil.getBoolean("jdk.tls.server.enableSessionTicketExtension", false);
 
-     static final boolean SERVER_ENABLE_SESSION_TICKET_TLSV13 =
+    static final boolean SERVER_ENABLE_SESSION_TICKET_TLSV13 =
             SystemPropertyUtil.getBoolean("jdk.tls.server.enableSessionTicketExtension", true);
 
     static final boolean SERVER_ENABLE_SESSION_CACHE =
             SystemPropertyUtil.getBoolean("io.netty.handler.ssl.openssl.sessionCacheServer", true);
-    // session caching is disabled by default on the client side due a JDK bug:
-    // https://mail.openjdk.java.net/pipermail/security-dev/2021-March/024758.html
     static final boolean CLIENT_ENABLE_SESSION_CACHE =
-            SystemPropertyUtil.getBoolean("io.netty.handler.ssl.openssl.sessionCacheClient", false);
+            SystemPropertyUtil.getBoolean("io.netty.handler.ssl.openssl.sessionCacheClient", true);
 
     /**
      * The OpenSSL SSL_CTX object.
@@ -142,10 +146,13 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
         @Override
         protected void deallocate() {
-            destroy();
-            if (leak != null) {
-                boolean closed = leak.close(ReferenceCountedOpenSslContext.this);
-                assert closed;
+            try {
+                destroy();
+            } finally {
+                if (leak != null) {
+                    boolean closed = leak.close(ReferenceCountedOpenSslContext.this);
+                    assert closed;
+                }
             }
         }
     };
@@ -153,8 +160,12 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
     final Certificate[] keyCertChain;
     final ClientAuth clientAuth;
     final String[] protocols;
+    final String endpointIdentificationAlgorithm;
+    final boolean hasTLSv13Cipher;
+    final boolean hasTmpDhKeys;
+
     final boolean enableOcsp;
-    final OpenSslEngineMap engineMap = new DefaultOpenSslEngineMap();
+    final OpenSslEngineMap engines = new OpenSslEngineMap();
     final ReadWriteLock ctxLock = new ReentrantReadWriteLock();
 
     private volatile int bioNonApplicationBufferSize = DEFAULT_BIO_NON_APPLICATION_BUFFER_SIZE;
@@ -206,10 +217,12 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
     ReferenceCountedOpenSslContext(Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
                                    OpenSslApplicationProtocolNegotiator apn, int mode, Certificate[] keyCertChain,
-                                   ClientAuth clientAuth, String[] protocols, boolean startTls, boolean enableOcsp,
-                                   boolean leakDetection, Map.Entry<SslContextOption<?>, Object>... ctxOptions)
+                                   ClientAuth clientAuth, String[] protocols, boolean startTls,
+                                   String endpointIdentificationAlgorithm, boolean enableOcsp,
+                                   boolean leakDetection, ResumptionController resumptionController,
+                                   Map.Entry<SslContextOption<?>, Object>... ctxOptions)
             throws SSLException {
-        super(startTls);
+        super(startTls, resumptionController);
 
         OpenSsl.ensureAvailability();
 
@@ -225,7 +238,10 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         boolean useTasks = USE_TASKS;
         OpenSslPrivateKeyMethod privateKeyMethod = null;
         OpenSslAsyncPrivateKeyMethod asyncPrivateKeyMethod = null;
-
+        OpenSslCertificateCompressionConfig certCompressionConfig = null;
+        Integer maxCertificateList = null;
+        Integer tmpDhKeyLength = null;
+        String[] groups = OpenSsl.NAMED_GROUPS;
         if (ctxOptions != null) {
             for (Map.Entry<SslContextOption<?>, Object> ctxOpt : ctxOptions) {
                 SslContextOption<?> option = ctxOpt.getKey();
@@ -238,6 +254,19 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
                     privateKeyMethod = (OpenSslPrivateKeyMethod) ctxOpt.getValue();
                 } else if (option == OpenSslContextOption.ASYNC_PRIVATE_KEY_METHOD) {
                     asyncPrivateKeyMethod = (OpenSslAsyncPrivateKeyMethod) ctxOpt.getValue();
+                } else if (option == OpenSslContextOption.CERTIFICATE_COMPRESSION_ALGORITHMS) {
+                    certCompressionConfig = (OpenSslCertificateCompressionConfig) ctxOpt.getValue();
+                } else if (option == OpenSslContextOption.MAX_CERTIFICATE_LIST_BYTES) {
+                    maxCertificateList = (Integer) ctxOpt.getValue();
+                } else if (option == OpenSslContextOption.TMP_DH_KEYLENGTH) {
+                    tmpDhKeyLength = (Integer) ctxOpt.getValue();
+                } else if (option == OpenSslContextOption.GROUPS) {
+                    String[] groupsArray = (String[]) ctxOpt.getValue();
+                    Set<String> groupsSet = new LinkedHashSet<String>(groupsArray.length);
+                    for (String group : groupsArray) {
+                        groupsSet.add(GroupsConverter.toOpenSsl(group));
+                    }
+                    groups = groupsSet.toArray(EmptyArrays.EMPTY_STRINGS);
                 } else {
                     logger.debug("Skipping unsupported " + SslContextOption.class.getSimpleName()
                             + ": " + ctxOpt.getKey());
@@ -255,7 +284,8 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         leak = leakDetection ? leakDetector.track(this) : null;
         this.mode = mode;
         this.clientAuth = isServer() ? checkNotNull(clientAuth, "clientAuth") : ClientAuth.NONE;
-        this.protocols = protocols;
+        this.protocols = protocols == null ? OpenSsl.defaultProtocols(mode == SSL.SSL_MODE_CLIENT) : protocols;
+        this.endpointIdentificationAlgorithm = endpointIdentificationAlgorithm;
         this.enableOcsp = enableOcsp;
 
         this.keyCertChain = keyCertChain == null ? null : keyCertChain.clone();
@@ -273,10 +303,10 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         boolean success = false;
         try {
             boolean tlsv13Supported = OpenSsl.isTlsv13Supported();
-
+            boolean anyTlsv13Ciphers = false;
             try {
                 int protocolOpts = SSL.SSL_PROTOCOL_SSLV3 | SSL.SSL_PROTOCOL_TLSV1 |
-                                   SSL.SSL_PROTOCOL_TLSV1_1 | SSL.SSL_PROTOCOL_TLSV1_2;
+                        SSL.SSL_PROTOCOL_TLSV1_1 | SSL.SSL_PROTOCOL_TLSV1_2;
                 if (tlsv13Supported) {
                     protocolOpts |= SSL.SSL_PROTOCOL_TLSV1_3;
                 }
@@ -299,14 +329,18 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
                     }
                 } else {
                     CipherSuiteConverter.convertToCipherStrings(
-                            unmodifiableCiphers, cipherBuilder, cipherTLSv13Builder, OpenSsl.isBoringSSL());
+                            unmodifiableCiphers, cipherBuilder, cipherTLSv13Builder,
+                            OpenSsl.isBoringSSL());
 
                     // Set non TLSv1.3 ciphers.
                     SSLContext.setCipherSuite(ctx, cipherBuilder.toString(), false);
                     if (tlsv13Supported) {
                         // Set TLSv1.3 ciphers.
-                        SSLContext.setCipherSuite(ctx,
-                                OpenSsl.checkTls13Ciphers(logger, cipherTLSv13Builder.toString()), true);
+                        String tlsv13Ciphers = OpenSsl.checkTls13Ciphers(logger, cipherTLSv13Builder.toString());
+                        SSLContext.setCipherSuite(ctx, tlsv13Ciphers, true);
+                        if (!tlsv13Ciphers.isEmpty()) {
+                            anyTlsv13Ciphers = true;
+                        }
                     }
                 }
             } catch (SSLException e) {
@@ -316,31 +350,39 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
             }
 
             int options = SSLContext.getOptions(ctx) |
-                          SSL.SSL_OP_NO_SSLv2 |
-                          SSL.SSL_OP_NO_SSLv3 |
-                          // Disable TLSv1 and TLSv1.1 by default as these are not considered secure anymore
-                          // and the JDK is doing the same:
-                          // https://www.oracle.com/java/technologies/javase/8u291-relnotes.html
-                          SSL.SSL_OP_NO_TLSv1 |
-                          SSL.SSL_OP_NO_TLSv1_1 |
+                    SSL.SSL_OP_NO_SSLv2 |
+                    SSL.SSL_OP_NO_SSLv3 |
+                    // Disable TLSv1 and TLSv1.1 by default as these are not considered secure anymore
+                    // and the JDK is doing the same:
+                    // https://www.oracle.com/java/technologies/javase/8u291-relnotes.html
+                    SSL.SSL_OP_NO_TLSv1 |
+                    SSL.SSL_OP_NO_TLSv1_1 |
 
-                          SSL.SSL_OP_CIPHER_SERVER_PREFERENCE |
+                    SSL.SSL_OP_CIPHER_SERVER_PREFERENCE |
 
-                          // We do not support compression at the moment so we should explicitly disable it.
-                          SSL.SSL_OP_NO_COMPRESSION |
+                    // We do not support compression at the moment so we should explicitly disable it.
+                    SSL.SSL_OP_NO_COMPRESSION |
 
-                          // Disable ticket support by default to be more inline with SSLEngineImpl of the JDK.
-                          // This also let SSLSession.getId() work the same way for the JDK implementation and the
-                          // OpenSSLEngine. If tickets are supported SSLSession.getId() will only return an ID on the
-                          // server-side if it could make use of tickets.
-                          SSL.SSL_OP_NO_TICKET;
+                    // Disable ticket support by default to be more inline with SSLEngineImpl of the JDK.
+                    // This also let SSLSession.getId() work the same way for the JDK implementation and the
+                    // OpenSSLEngine. If tickets are supported SSLSession.getId() will only return an ID on the
+                    // server-side if it could make use of tickets.
+                    SSL.SSL_OP_NO_TICKET;
 
             if (cipherBuilder.length() == 0) {
                 // No ciphers that are compatible with SSLv2 / SSLv3 / TLSv1 / TLSv1.1 / TLSv1.2
                 options |= SSL.SSL_OP_NO_SSLv2 | SSL.SSL_OP_NO_SSLv3 | SSL.SSL_OP_NO_TLSv1
-                           | SSL.SSL_OP_NO_TLSv1_1 | SSL.SSL_OP_NO_TLSv1_2;
+                        | SSL.SSL_OP_NO_TLSv1_1 | SSL.SSL_OP_NO_TLSv1_2;
             }
 
+            if (!tlsv13Supported) {
+                // Explicit disable TLSv1.3
+                // See:
+                //  - https://github.com/netty/netty/issues/12968
+                options |= SSL.SSL_OP_NO_TLSv1_3;
+            }
+
+            hasTLSv13Cipher = anyTlsv13Ciphers;
             SSLContext.setOptions(ctx, options);
 
             // We need to enable SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER as the memory address may change between
@@ -348,14 +390,20 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
             // See https://github.com/netty/netty-tcnative/issues/100
             SSLContext.setMode(ctx, SSLContext.getMode(ctx) | SSL.SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
-            if (DH_KEY_LENGTH != null) {
+            if (tmpDhKeyLength != null) {
+                SSLContext.setTmpDHLength(ctx, tmpDhKeyLength);
+                hasTmpDhKeys = true;
+            } else if (DH_KEY_LENGTH != null) {
                 SSLContext.setTmpDHLength(ctx, DH_KEY_LENGTH);
+                hasTmpDhKeys = true;
+            } else {
+                hasTmpDhKeys = false;
             }
 
             List<String> nextProtoList = apn.protocols();
-                /* Set next protocols for next protocol negotiation extension, if specified */
+            /* Set next protocols for next protocol negotiation extension, if specified */
             if (!nextProtoList.isEmpty()) {
-                String[] appProtocols = nextProtoList.toArray(new String[0]);
+                String[] appProtocols = nextProtoList.toArray(EmptyArrays.EMPTY_STRINGS);
                 int selectorBehavior = opensslSelectorFailureBehavior(apn.selectorFailureBehavior());
 
                 switch (apn.protocol()) {
@@ -380,13 +428,46 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
             SSLContext.setUseTasks(ctx, useTasks);
             if (privateKeyMethod != null) {
-                SSLContext.setPrivateKeyMethod(ctx, new PrivateKeyMethod(engineMap, privateKeyMethod));
+                SSLContext.setPrivateKeyMethod(ctx, new PrivateKeyMethod(engines, privateKeyMethod));
             }
             if (asyncPrivateKeyMethod != null) {
-                SSLContext.setPrivateKeyMethod(ctx, new AsyncPrivateKeyMethod(engineMap, asyncPrivateKeyMethod));
+                SSLContext.setPrivateKeyMethod(ctx, new AsyncPrivateKeyMethod(engines, asyncPrivateKeyMethod));
             }
-            // Set the curves.
-            SSLContext.setCurvesList(ctx, OpenSsl.NAMED_GROUPS);
+            if (certCompressionConfig != null) {
+                for (OpenSslCertificateCompressionConfig.AlgorithmConfig configPair : certCompressionConfig) {
+                    final CertificateCompressionAlgo algo = new CompressionAlgorithm(engines, configPair.algorithm());
+                    switch (configPair.mode()) {
+                        case Decompress:
+                            SSLContext.addCertificateCompressionAlgorithm(
+                                    ctx, SSL.SSL_CERT_COMPRESSION_DIRECTION_DECOMPRESS, algo);
+                            break;
+                        case Compress:
+                            SSLContext.addCertificateCompressionAlgorithm(
+                                    ctx, SSL.SSL_CERT_COMPRESSION_DIRECTION_COMPRESS, algo);
+                            break;
+                        case Both:
+                            SSLContext.addCertificateCompressionAlgorithm(
+                                    ctx, SSL.SSL_CERT_COMPRESSION_DIRECTION_BOTH, algo);
+                            break;
+                        default:
+                            throw new IllegalStateException();
+                    }
+                }
+            }
+            if (maxCertificateList != null) {
+                SSLContext.setMaxCertList(ctx, maxCertificateList);
+            }
+
+            // Set the curves / groups if anything is configured.
+            if (groups.length > 0 && !SSLContext.setCurvesList(ctx, groups)) {
+                String msg = "failed to set curves / groups suite: " + Arrays.toString(groups);
+                int err = SSL.getLastErrorNumber();
+                if (err != 0) {
+                    // We have some more details about why the operations failed, include these into the message.
+                    msg += ". " + SSL.getErrorString(err);
+                }
+                throw new SSLException(msg);
+            }
             success = true;
         } finally {
             if (!success) {
@@ -428,27 +509,30 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
     @Override
     protected final SslHandler newHandler(ByteBufAllocator alloc, boolean startTls) {
-        return new SslHandler(newEngine0(alloc, null, -1, false), startTls);
+        return new SslHandler(newEngine0(alloc, null, -1, false), startTls, ImmediateExecutor.INSTANCE,
+                resumptionController);
     }
 
     @Override
     protected final SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort, boolean startTls) {
-        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls);
+        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls, ImmediateExecutor.INSTANCE,
+                resumptionController);
     }
 
     @Override
     protected SslHandler newHandler(ByteBufAllocator alloc, boolean startTls, Executor executor) {
-        return new SslHandler(newEngine0(alloc, null, -1, false), startTls, executor);
+        return new SslHandler(newEngine0(alloc, null, -1, false), startTls, executor, resumptionController);
     }
 
     @Override
     protected SslHandler newHandler(ByteBufAllocator alloc, String peerHost, int peerPort,
                                     boolean startTls, Executor executor) {
-        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), executor);
+        return new SslHandler(newEngine0(alloc, peerHost, peerPort, false), startTls, executor, resumptionController);
     }
 
     SSLEngine newEngine0(ByteBufAllocator alloc, String peerHost, int peerPort, boolean jdkCompatibilityMode) {
-        return new ReferenceCountedOpenSslEngine(this, alloc, peerHost, peerPort, jdkCompatibilityMode, true);
+        return new ReferenceCountedOpenSslEngine(this, alloc, peerHost, peerPort, jdkCompatibilityMode, true,
+                endpointIdentificationAlgorithm);
     }
 
     /**
@@ -566,7 +650,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         Lock writerLock = ctxLock.writeLock();
         writerLock.lock();
         try {
-            SSLContext.setPrivateKeyMethod(ctx, new PrivateKeyMethod(engineMap, method));
+            SSLContext.setPrivateKeyMethod(ctx, new PrivateKeyMethod(engines, method));
         } finally {
             writerLock.unlock();
         }
@@ -620,13 +704,31 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         return peerCerts;
     }
 
+    /**
+     * @deprecated This method is kept for API backwards compatibility.
+     */
+    @Deprecated
     protected static X509TrustManager chooseTrustManager(TrustManager[] managers) {
+        return chooseTrustManager(managers, null);
+    }
+
+    static X509TrustManager chooseTrustManager(TrustManager[] managers,
+                                                         ResumptionController resumptionController) {
         for (TrustManager m : managers) {
             if (m instanceof X509TrustManager) {
+                X509TrustManager tm = (X509TrustManager) m;
                 if (PlatformDependent.javaVersion() >= 7) {
-                    return OpenSslX509TrustManagerWrapper.wrapIfNeeded((X509TrustManager) m);
+                    if (resumptionController != null) {
+                        tm = (X509TrustManager) resumptionController.wrapIfNeeded(tm);
+                    }
+                    tm = OpenSslX509TrustManagerWrapper.wrapIfNeeded(tm);
+                    if (useExtendedTrustManager(tm)) {
+                        // Wrap the TrustManager to provide a better exception message for users to debug hostname
+                        // validation failures.
+                        tm = new EnhancingX509ExtendedTrustManager(tm);
+                    }
                 }
-                return (X509TrustManager) m;
+                return tm;
             }
         }
         throw new IllegalStateException("no X509TrustManager found");
@@ -730,15 +832,15 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
     }
 
     abstract static class AbstractCertificateVerifier extends CertificateVerifier {
-        private final OpenSslEngineMap engineMap;
+        private final OpenSslEngineMap engines;
 
-        AbstractCertificateVerifier(OpenSslEngineMap engineMap) {
-            this.engineMap = engineMap;
+        AbstractCertificateVerifier(OpenSslEngineMap engines) {
+            this.engines = engines;
         }
 
         @Override
         public final int verify(long ssl, byte[][] chain, String auth) {
-            final ReferenceCountedOpenSslEngine engine = engineMap.get(ssl);
+            final ReferenceCountedOpenSslEngine engine = engines.get(ssl);
             if (engine == null) {
                 // May be null if it was destroyed in the meantime.
                 return CertificateVerifier.X509_V_ERR_UNSPECIFIED;
@@ -803,25 +905,6 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
         abstract void verify(ReferenceCountedOpenSslEngine engine, X509Certificate[] peerCerts,
                              String auth) throws Exception;
-    }
-
-    private static final class DefaultOpenSslEngineMap implements OpenSslEngineMap {
-        private final Map<Long, ReferenceCountedOpenSslEngine> engines = PlatformDependent.newConcurrentHashMap();
-
-        @Override
-        public ReferenceCountedOpenSslEngine remove(long ssl) {
-            return engines.remove(ssl);
-        }
-
-        @Override
-        public void add(ReferenceCountedOpenSslEngine engine) {
-            engines.put(engine.sslPointer(), engine);
-        }
-
-        @Override
-        public ReferenceCountedOpenSslEngine get(long ssl) {
-            return engines.get(ssl);
-        }
     }
 
     static void setKeyMaterial(long ctx, X509Certificate[] keyCertChain, PrivateKey key, String keyPassword)
@@ -964,27 +1047,28 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         return new OpenSslKeyMaterialProvider(chooseX509KeyManager(factory.getKeyManagers()), password);
     }
 
+    private static ReferenceCountedOpenSslEngine retrieveEngine(OpenSslEngineMap engineMap, long ssl)
+            throws SSLException {
+        ReferenceCountedOpenSslEngine engine = engineMap.get(ssl);
+        if (engine == null) {
+            throw new SSLException("Could not find a " +
+                    StringUtil.simpleClassName(ReferenceCountedOpenSslEngine.class) + " for sslPointer " + ssl);
+        }
+        return engine;
+    }
+
     private static final class PrivateKeyMethod implements SSLPrivateKeyMethod {
 
-        private final OpenSslEngineMap engineMap;
+        private final OpenSslEngineMap engines;
         private final OpenSslPrivateKeyMethod keyMethod;
-        PrivateKeyMethod(OpenSslEngineMap engineMap, OpenSslPrivateKeyMethod keyMethod) {
-            this.engineMap = engineMap;
+        PrivateKeyMethod(OpenSslEngineMap engines, OpenSslPrivateKeyMethod keyMethod) {
+            this.engines = engines;
             this.keyMethod = keyMethod;
-        }
-
-        private ReferenceCountedOpenSslEngine retrieveEngine(long ssl) throws SSLException {
-            ReferenceCountedOpenSslEngine engine = engineMap.get(ssl);
-            if (engine == null) {
-                throw new SSLException("Could not find a " +
-                        StringUtil.simpleClassName(ReferenceCountedOpenSslEngine.class) + " for sslPointer " + ssl);
-            }
-            return engine;
         }
 
         @Override
         public byte[] sign(long ssl, int signatureAlgorithm, byte[] digest) throws Exception {
-            ReferenceCountedOpenSslEngine engine = retrieveEngine(ssl);
+            ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
             try {
                 return verifyResult(keyMethod.sign(engine, signatureAlgorithm, digest));
             } catch (Exception e) {
@@ -995,7 +1079,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
         @Override
         public byte[] decrypt(long ssl, byte[] input) throws Exception {
-            ReferenceCountedOpenSslEngine engine = retrieveEngine(ssl);
+            ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
             try {
                 return verifyResult(keyMethod.decrypt(engine, input));
             } catch (Exception e) {
@@ -1007,27 +1091,19 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
 
     private static final class AsyncPrivateKeyMethod implements AsyncSSLPrivateKeyMethod {
 
-        private final OpenSslEngineMap engineMap;
+        private final OpenSslEngineMap engines;
         private final OpenSslAsyncPrivateKeyMethod keyMethod;
 
-        AsyncPrivateKeyMethod(OpenSslEngineMap engineMap, OpenSslAsyncPrivateKeyMethod keyMethod) {
-            this.engineMap = engineMap;
+        AsyncPrivateKeyMethod(OpenSslEngineMap engines,
+                              OpenSslAsyncPrivateKeyMethod keyMethod) {
+            this.engines = engines;
             this.keyMethod = keyMethod;
-        }
-
-        private ReferenceCountedOpenSslEngine retrieveEngine(long ssl) throws SSLException {
-            ReferenceCountedOpenSslEngine engine = engineMap.get(ssl);
-            if (engine == null) {
-                throw new SSLException("Could not find a " +
-                        StringUtil.simpleClassName(ReferenceCountedOpenSslEngine.class) + " for sslPointer " + ssl);
-            }
-            return engine;
         }
 
         @Override
         public void sign(long ssl, int signatureAlgorithm, byte[] bytes, ResultCallback<byte[]> resultCallback) {
             try {
-                ReferenceCountedOpenSslEngine engine = retrieveEngine(ssl);
+                ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
                 keyMethod.sign(engine, signatureAlgorithm, bytes)
                         .addListener(new ResultCallbackListener(engine, ssl, resultCallback));
             } catch (SSLException e) {
@@ -1038,7 +1114,7 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
         @Override
         public void decrypt(long ssl, byte[] bytes, ResultCallback<byte[]> resultCallback) {
             try {
-                ReferenceCountedOpenSslEngine engine = retrieveEngine(ssl);
+                ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
                 keyMethod.decrypt(engine, bytes)
                         .addListener(new ResultCallbackListener(engine, ssl, resultCallback));
             } catch (SSLException e) {
@@ -1081,5 +1157,33 @@ public abstract class ReferenceCountedOpenSslContext extends SslContext implemen
             throw new SignatureException();
         }
         return result;
+    }
+
+    private static final class CompressionAlgorithm implements CertificateCompressionAlgo {
+        private final OpenSslEngineMap engines;
+        private final OpenSslCertificateCompressionAlgorithm compressionAlgorithm;
+
+        CompressionAlgorithm(OpenSslEngineMap engines,
+                             OpenSslCertificateCompressionAlgorithm compressionAlgorithm) {
+            this.engines = engines;
+            this.compressionAlgorithm = compressionAlgorithm;
+        }
+
+        @Override
+        public byte[] compress(long ssl, byte[] bytes) throws Exception {
+            ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
+            return compressionAlgorithm.compress(engine, bytes);
+        }
+
+        @Override
+        public byte[] decompress(long ssl, int len, byte[] bytes) throws Exception {
+            ReferenceCountedOpenSslEngine engine = retrieveEngine(engines, ssl);
+            return compressionAlgorithm.decompress(engine, len, bytes);
+        }
+
+        @Override
+        public int algorithmId() {
+            return compressionAlgorithm.algorithmId();
+        }
     }
 }

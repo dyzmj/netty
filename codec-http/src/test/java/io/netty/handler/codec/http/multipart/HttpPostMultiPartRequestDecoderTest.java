@@ -96,6 +96,50 @@ public class HttpPostMultiPartRequestDecoderTest {
     }
 
     @Test
+    public void decodeMustCleanFilenameCharacters() {
+        String content = "\n--861fbeab-cd20-470c-9609-d40a0f704466\r\n" +
+                "content-disposition: form-data; " +
+                "name=\"file\"; filename=\" dir\\file\0\u007F÷.txt \"\r\n" +
+                "content-type: text/plain\r\n" +
+                "Content-Length: 1\r\n\r\n" +
+                "x\r\n--861fbeab-cd20-470c-9609-d40a0f704466--\r\n";
+        FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/upload",
+                Unpooled.copiedBuffer(content, CharsetUtil.UTF_8));
+        req.headers().set("content-type", "multipart/form-data; boundary=861fbeab-cd20-470c-9609-d40a0f704466");
+        req.headers().set("content-length", content.length());
+
+        HttpPostMultipartRequestDecoder test = new HttpPostMultipartRequestDecoder(req);
+        FileUpload httpData = (FileUpload) test.getBodyHttpDatas("file").get(0);
+        try {
+            assertEquals("dirfile  ÷.txt", httpData.getFilename());
+        } finally {
+            test.destroy();
+        }
+    }
+
+    @Test
+    public void decodeMustCleanFilenamePercentEncodedCharacters() {
+        String content = "\n--861fbeab-cd20-470c-9609-d40a0f704466\r\n" +
+                "content-disposition: form-data; " +
+                "name=\"file\"; filename*=UTF-8''\"%20dir\\file%00%13%7F÷.txt%20\"\r\n" +
+                "content-type: text/plain\r\n" +
+                "Content-Length: 1\r\n\r\n" +
+                "x\r\n--861fbeab-cd20-470c-9609-d40a0f704466--\r\n";
+        FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/upload",
+                Unpooled.copiedBuffer(content, CharsetUtil.UTF_8));
+        req.headers().set("content-type", "multipart/form-data; boundary=861fbeab-cd20-470c-9609-d40a0f704466");
+        req.headers().set("content-length", content.length());
+
+        HttpPostMultipartRequestDecoder test = new HttpPostMultipartRequestDecoder(req);
+        FileUpload httpData = (FileUpload) test.getBodyHttpDatas("file").get(0);
+        try {
+            assertEquals("dirfile   ÷.txt", httpData.getFilename());
+        } finally {
+            test.destroy();
+        }
+    }
+
+    @Test
     public void testDelimiterExceedLeftSpaceInCurrentBuffer() {
         String delimiter = "--861fbeab-cd20-470c-9609-d40a0f704466";
         String suffix = '\n' + delimiter + "--\n";
@@ -300,6 +344,25 @@ public class HttpPostMultiPartRequestDecoderTest {
         commonNotBadReleaseBuffersDuringDecoding(factory, false);
     }
 
+    @Test
+    public void testDecodeFullHttpRequestWithOptionalParameters() {
+        String content = "\n--861fbeab-cd20-470c-9609-d40a0f704466\r\n" +
+                "content-disposition: form-data; " +
+                "name=\"file\"; filename=\"myfile.ogg\"\r\n" +
+                "content-type: audio/ogg; codecs=opus; charset=UTF8\r\ncontent-transfer-encoding: binary\r\n" +
+                "\r\n\u0001\u0002\u0003\u0004\r\n--861fbeab-cd20-470c-9609-d40a0f704466--\r\n\",\n";
+
+        FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, "/upload",
+                Unpooled.copiedBuffer(content, CharsetUtil.US_ASCII));
+        req.headers().set("content-type", "multipart/form-data; boundary=861fbeab-cd20-470c-9609-d40a0f704466");
+        req.headers().set("content-length", content.length());
+
+        HttpPostMultipartRequestDecoder test = new HttpPostMultipartRequestDecoder(req);
+        FileUpload httpData = (FileUpload) test.getBodyHttpDatas("file").get(0);
+        assertEquals("audio/ogg", httpData.getContentType());
+        test.destroy();
+    }
+
     private static void commonNotBadReleaseBuffersDuringDecoding(HttpDataFactory factory, boolean inMemory)
             throws IOException {
         int nbItems = 20;
@@ -361,7 +424,7 @@ public class HttpPostMultiPartRequestDecoderTest {
             assertTrue(Arrays.equals(body, data.get()));
         }
         // To not be done since will load full file on memory: assertEquals(data.get().length, fileSize);
-        // Not mandatory since implicitely called during destroy of decoder
+        // Not mandatory since implicitly called during destroy of decoder
         for (InterfaceHttpData httpData: decoder.getBodyHttpDatas()) {
             httpData.release();
             factory.removeHttpDataFromClean(request, httpData);

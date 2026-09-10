@@ -343,6 +343,7 @@ public class SimpleChannelPool implements ChannelPool {
                 releaseAndOffer(channel, promise);
             } else { //channel not healthy, just releasing it.
                 handler.channelReleased(channel);
+                closeChannel(channel);
                 promise.setSuccess(null);
             }
         } catch (Throwable cause) {
@@ -433,7 +434,7 @@ public class SimpleChannelPool implements ChannelPool {
 
         // Suppress a warning since the method doesn't need synchronization
         @Override
-        public Throwable fillInStackTrace() {   // lgtm[java/non-sync-override]
+        public Throwable fillInStackTrace() {
             return this;
         }
     }

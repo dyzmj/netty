@@ -42,6 +42,9 @@ import static io.netty.util.internal.ObjectUtil.*;
  * {@code maxChunkSize} The maximum length of the content or each chunk.  If the content length (or the length of each
  * chunk) exceeds this value, the content or chunk ill be split into multiple {@link StompContentSubframe}s whose length
  * is {@code maxChunkSize} at maximum.
+ * <br>
+ * {@code maxNumHeaders} The maximum number of headers per frame.
+ * If this limit exceeded a {@link TooLongFrameException} will be raised.
  *
  * <h3>Chunked Content</h3>
  * <p>
@@ -54,8 +57,13 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
 
     private static final int DEFAULT_CHUNK_SIZE = 8132;
     private static final int DEFAULT_MAX_LINE_LENGTH = 1024;
+    private static final int DEFAULT_MAX_NUMBER_HEADERS = 128;
 
-    enum State {
+    /**
+     * @deprecated this should never be used by an user!
+     */
+    @Deprecated
+    public enum State {
         SKIP_CONTROL_CHARACTERS,
         READ_HEADERS,
         READ_CONTENT,
@@ -76,7 +84,7 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
     }
 
     public StompSubframeDecoder(boolean validateHeaders) {
-        this(DEFAULT_MAX_LINE_LENGTH, DEFAULT_CHUNK_SIZE, validateHeaders);
+        this(DEFAULT_MAX_LINE_LENGTH, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_NUMBER_HEADERS, validateHeaders);
     }
 
     public StompSubframeDecoder(int maxLineLength, int maxChunkSize) {
@@ -84,12 +92,18 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
     }
 
     public StompSubframeDecoder(int maxLineLength, int maxChunkSize, boolean validateHeaders) {
+        this(maxLineLength, maxChunkSize, DEFAULT_MAX_NUMBER_HEADERS, validateHeaders);
+    }
+
+    public StompSubframeDecoder(int maxLineLength, int maxChunkSize, int maxNumHeaders, boolean validateHeaders) {
         super(State.SKIP_CONTROL_CHARACTERS);
         checkPositive(maxLineLength, "maxLineLength");
         checkPositive(maxChunkSize, "maxChunkSize");
+        checkPositive(maxNumHeaders, "maxNumHeaders");
+
         this.maxChunkSize = maxChunkSize;
         commandParser = new Utf8LineParser(new AppendableCharSequence(16), maxLineLength);
-        headerParser = new HeaderParser(new AppendableCharSequence(128), maxLineLength, validateHeaders);
+        headerParser = new HeaderParser(new AppendableCharSequence(128), maxLineLength, maxNumHeaders, validateHeaders);
     }
 
     @Override
@@ -105,7 +119,7 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
                 try {
                     command = readCommand(in);
                     frame = new DefaultStompHeadersSubframe(command);
-                    checkpoint(readHeaders(in, frame.headers()));
+                    checkpoint(readHeaders(in, frame));
                     out.add(frame);
                 } catch (Exception e) {
                     if (frame == null) {
@@ -175,16 +189,25 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
                     resetDecoder();
             }
         } catch (Exception e) {
-            if (lastContent != null) {
-                lastContent.release();
-                lastContent = null;
-            }
+            releaseLastContentIfNeeded();
 
             StompContentSubframe errorContent = new DefaultLastStompContentSubframe(Unpooled.EMPTY_BUFFER);
             errorContent.setDecoderResult(DecoderResult.failure(e));
             out.add(errorContent);
             checkpoint(State.BAD_FRAME);
         }
+    }
+
+    private void releaseLastContentIfNeeded() {
+        if (lastContent != null) {
+            lastContent.release();
+            lastContent = null;
+        }
+    }
+
+    @Override
+    protected void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
+        releaseLastContentIfNeeded();
     }
 
     private StompCommand readCommand(ByteBuf in) {
@@ -200,9 +223,10 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
         }
     }
 
-    private State readHeaders(ByteBuf buffer, StompHeaders headers) {
+    private State readHeaders(ByteBuf buffer, StompHeadersSubframe headersSubframe) {
+        StompHeaders headers = headersSubframe.headers();
         for (;;) {
-            boolean headerRead = headerParser.parseHeader(headers, buffer);
+            boolean headerRead = headerParser.parseHeader(headersSubframe, buffer);
             if (!headerRead) {
                 if (headers.contains(StompHeaders.CONTENT_LENGTH)) {
                     contentLength = getContentLength(headers);
@@ -220,6 +244,10 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
         if (contentLength < 0) {
             throw new DecoderException(StompHeaders.CONTENT_LENGTH + " must be non-negative");
         }
+        if (contentLength > Integer.MAX_VALUE) {
+            throw new TooLongFrameException(StompHeaders.CONTENT_LENGTH + " exceeds the maximum allowed value: "
+                    + contentLength);
+        }
         return contentLength;
     }
 
@@ -233,6 +261,9 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
     private static void skipControlCharacters(ByteBuf buffer) {
         byte b;
         for (;;) {
+            if (!buffer.isReadable()) {
+                return;
+            }
             b = buffer.readByte();
             if (b != StompConstants.CR && b != StompConstants.LF) {
                 buffer.readerIndex(buffer.readerIndex() - 1);
@@ -280,6 +311,8 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
         @Override
         public boolean process(byte nextByte) throws Exception {
             if (nextByte == StompConstants.CR) {
+                interim = 0;
+                nextRead = false;
                 ++lineLength;
                 return true;
             }
@@ -299,11 +332,11 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
                 interim |= (nextByte & 0x3F) << 6;
                 nextRead = false;
             } else if (interim != 0) { // flush 2 or 3 byte
-                charSeq.append((char) (interim | (nextByte & 0x3F)));
+                appendTo(charSeq, (char) (interim | (nextByte & 0x3F)));
                 interim = 0;
             } else if (nextByte >= 0) { // INITIAL BRANCH
                 // The first 128 characters (US-ASCII) need one byte.
-                charSeq.append((char) nextByte);
+                appendTo(charSeq, (char) nextByte);
             } else if ((nextByte & 0xE0) == 0xC0) {
                 // The next 1920 characters need two bytes and we can define
                 // a first byte by mask 110xxxxx.
@@ -317,6 +350,10 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
             return true;
         }
 
+        protected void appendTo(AppendableCharSequence charSeq, char chr) {
+            charSeq.append(chr);
+        }
+
         protected void reset() {
             charSeq.reset();
             lineLength = 0;
@@ -328,23 +365,34 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
     private static final class HeaderParser extends Utf8LineParser {
 
         private final boolean validateHeaders;
-
+        private final int maxNumHeaders;
+        private int numHeaders;
         private String name;
         private boolean valid;
 
-        HeaderParser(AppendableCharSequence charSeq, int maxLineLength, boolean validateHeaders) {
+        private boolean shouldUnescape;
+        private boolean unescapeInProgress;
+
+        HeaderParser(AppendableCharSequence charSeq, int maxLineLength, int maxNumHeaders, boolean validateHeaders) {
             super(charSeq, maxLineLength);
             this.validateHeaders = validateHeaders;
+            this.maxNumHeaders = maxNumHeaders;
         }
 
-        boolean parseHeader(StompHeaders headers, ByteBuf buf) {
+        boolean parseHeader(StompHeadersSubframe headersSubframe, ByteBuf buf) {
+            shouldUnescape = shouldUnescape(headersSubframe.command());
             AppendableCharSequence value = super.parse(buf);
             if (value == null || (name == null && value.length() == 0)) {
+                numHeaders = 0;
                 return false;
             }
 
+            numHeaders++;
+            if (maxNumHeaders < numHeaders) {
+                throw new TooLongFrameException("maximum number of headers exceeded: " + maxNumHeaders);
+            }
             if (valid) {
-                headers.add(name, value.toString());
+                headersSubframe.headers().add(name, value.toString());
             } else if (validateHeaders) {
                 if (StringUtil.isNullOrEmpty(name)) {
                     throw new IllegalArgumentException("received an invalid header line '" + value + '\'');
@@ -378,10 +426,51 @@ public class StompSubframeDecoder extends ReplayingDecoder<State> {
         }
 
         @Override
+        protected void appendTo(AppendableCharSequence charSeq, char chr) {
+            if (!shouldUnescape) {
+                super.appendTo(charSeq, chr);
+                return;
+            }
+
+            if (chr == '\\') {
+                if (unescapeInProgress) {
+                    super.appendTo(charSeq, chr);
+                    unescapeInProgress = false;
+                } else {
+                    unescapeInProgress = true;
+                }
+                return;
+            }
+
+            if (unescapeInProgress) {
+                if (chr == 'c') {
+                    charSeq.append(':');
+                } else if (chr == 'r') {
+                    charSeq.append('\r');
+                } else if (chr == 'n') {
+                    charSeq.append('\n');
+                } else {
+                    charSeq.append('\\').append(chr);
+                    throw new IllegalArgumentException("received an invalid escape header sequence '" + charSeq + '\'');
+                }
+
+                unescapeInProgress = false;
+                return;
+            }
+
+            super.appendTo(charSeq, chr);
+        }
+
+        @Override
         protected void reset() {
             name = null;
             valid = false;
+            unescapeInProgress = false;
             super.reset();
+        }
+
+        private static boolean shouldUnescape(StompCommand command) {
+            return command != StompCommand.CONNECT && command != StompCommand.CONNECTED;
         }
     }
 }

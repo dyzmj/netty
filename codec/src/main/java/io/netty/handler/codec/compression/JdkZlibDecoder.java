@@ -36,6 +36,14 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private static final int FCOMMENT = 0x10;
     private static final int FRESERVED = 0xE0;
 
+    /**
+     * Smallest buffer we hand to {@link Inflater#inflate(byte[], int, int)}. The number of remaining input bytes is
+     * only a hint for how much output to expect: the inflater may still hold decoded data that did not fit into the
+     * previous output buffer, and by then it may have consumed all input bytes already
+     * ({@link Inflater#getRemaining()} == 0). Inflating into a zero-sized buffer can never make progress.
+     */
+    private static final int MIN_OUTPUT_BUFFER_SIZE = 512;
+
     private Inflater inflater;
     private final byte[] dictionary;
 
@@ -57,6 +65,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private GzipState gzipState = GzipState.HEADER_START;
     private int flags = -1;
     private int xlen = -1;
+    private boolean needsRead;
+
+    private static final int DEFAULT_MAX_FORWARD_BYTES = CompressionUtil.DEFAULT_MAX_FORWARD_BYTES;
+    private final int maxForwardBytes;
 
     private volatile boolean finished;
 
@@ -64,7 +76,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
 
     /**
      * Creates a new instance with the default wrapper ({@link ZlibWrapper#ZLIB}).
+     *
+     * @deprecated Use {@link JdkZlibDecoder#JdkZlibDecoder(int)}.
      */
+    @Deprecated
     public JdkZlibDecoder() {
         this(ZlibWrapper.ZLIB, null, false, 0);
     }
@@ -85,7 +100,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
      * Creates a new instance with the specified preset dictionary. The wrapper
      * is always {@link ZlibWrapper#ZLIB} because it is the only format that
      * supports the preset dictionary.
+     *
+     * @deprecated Use {@link JdkZlibDecoder#JdkZlibDecoder(byte[], int)}.
      */
+    @Deprecated
     public JdkZlibDecoder(byte[] dictionary) {
         this(ZlibWrapper.ZLIB, dictionary, false, 0);
     }
@@ -107,7 +125,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
      * Creates a new instance with the specified wrapper.
      * Be aware that only {@link ZlibWrapper#GZIP}, {@link ZlibWrapper#ZLIB} and {@link ZlibWrapper#NONE} are
      * supported atm.
+     *
+     * @deprecated Use {@link JdkZlibDecoder#JdkZlibDecoder(ZlibWrapper, int)}.
      */
+    @Deprecated
     public JdkZlibDecoder(ZlibWrapper wrapper) {
         this(wrapper, null, false, 0);
     }
@@ -125,6 +146,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
         this(wrapper, null, false, maxAllocation);
     }
 
+    /**
+     * @deprecated Use {@link JdkZlibDecoder#JdkZlibDecoder(ZlibWrapper, boolean, int)}.
+     */
+    @Deprecated
     public JdkZlibDecoder(ZlibWrapper wrapper, boolean decompressConcatenated) {
         this(wrapper, null, decompressConcatenated, 0);
     }
@@ -133,6 +158,10 @@ public class JdkZlibDecoder extends ZlibDecoder {
         this(wrapper, null, decompressConcatenated, maxAllocation);
     }
 
+    /**
+     * @deprecated Use {@link JdkZlibDecoder#JdkZlibDecoder(boolean, int)}.
+     */
+    @Deprecated
     public JdkZlibDecoder(boolean decompressConcatenated) {
         this(ZlibWrapper.GZIP, null, decompressConcatenated, 0);
     }
@@ -143,6 +172,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
 
     private JdkZlibDecoder(ZlibWrapper wrapper, byte[] dictionary, boolean decompressConcatenated, int maxAllocation) {
         super(maxAllocation);
+        this.maxForwardBytes = maxAllocation > 0 ? maxAllocation : DEFAULT_MAX_FORWARD_BYTES;
 
         ObjectUtil.checkNotNull(wrapper, "wrapper");
 
@@ -178,6 +208,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
 
     @Override
     protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        needsRead = true;
         if (finished) {
             // Skip data received after finished.
             in.skipBytes(in.readableBytes());
@@ -232,21 +263,35 @@ public class JdkZlibDecoder extends ZlibDecoder {
             }
         }
 
-        ByteBuf decompressed = prepareDecompressBuffer(ctx, null, inflater.getRemaining() << 1);
+        ByteBuf decompressed = prepareDecompressBuffer(ctx, null, preferredOutputBufferSize());
         try {
             boolean readFooter = false;
-            while (!inflater.needsInput()) {
+            // If this is true the last inflate(...) filled the output buffer completely, so the inflater may still
+            // hold decoded data even once all input bytes were consumed. needsInput() only tells us that the input
+            // was consumed, not that all output was produced, so on its own it would end the loop too early and
+            // the pending bytes would be dropped together with the input we skip below.
+            boolean pendingOutput = false;
+            while (pendingOutput || !inflater.needsInput()) {
                 byte[] outArray = decompressed.array();
                 int writerIndex = decompressed.writerIndex();
                 int outIndex = decompressed.arrayOffset() + writerIndex;
                 int writable = decompressed.writableBytes();
                 int outputLength = inflater.inflate(outArray, outIndex, writable);
+                pendingOutput = outputLength == writable;
                 if (outputLength > 0) {
                     decompressed.writerIndex(writerIndex + outputLength);
                     if (crc != null) {
                         crc.update(outArray, outIndex, outputLength);
                     }
-                } else  if (inflater.needsDictionary()) {
+                    if (maxAllocation == 0 && decompressed.readableBytes() >= maxForwardBytes) {
+                        // Forward the buffer once it exceeds the threshold to bound memory
+                        // while avoiding excessive fireChannelRead calls.
+                        ByteBuf buffer = decompressed;
+                        decompressed = null;
+                        needsRead = false;
+                        ctx.fireChannelRead(buffer);
+                    }
+                } else if (inflater.needsDictionary()) {
                     if (dictionary == null) {
                         throw new DecompressionException(
                                 "decompression failure, unable to set dictionary as non was specified");
@@ -262,7 +307,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     }
                     break;
                 } else {
-                    decompressed = prepareDecompressBuffer(ctx, decompressed, inflater.getRemaining() << 1);
+                    decompressed = prepareDecompressBuffer(ctx, decompressed, preferredOutputBufferSize());
                 }
             }
 
@@ -275,12 +320,25 @@ public class JdkZlibDecoder extends ZlibDecoder {
         } catch (DataFormatException e) {
             throw new DecompressionException("decompression failure", e);
         } finally {
-            if (decompressed.isReadable()) {
-                out.add(decompressed);
-            } else {
-                decompressed.release();
+            if (decompressed != null) {
+                if (decompressed.isReadable()) {
+                    needsRead = false;
+                    ctx.fireChannelRead(decompressed);
+                } else {
+                    decompressed.release();
+                }
             }
         }
+    }
+
+    /**
+     * The size we ask {@link #prepareDecompressBuffer(ChannelHandlerContext, ByteBuf, int)} for. Twice the remaining
+     * input is a good guess for how much output is still coming, but it must never be zero because
+     * {@link Inflater#inflate(byte[], int, int)} cannot write anything then. Any {@code maxAllocation} the user
+     * configured is still applied by {@code prepareDecompressBuffer(...)} and so keeps its meaning.
+     */
+    private int preferredOutputBufferSize() {
+        return Math.max(inflater.getRemaining() << 1, MIN_OUTPUT_BUFFER_SIZE);
     }
 
     private boolean handleGzipFooter(ByteBuf in) {
@@ -290,6 +348,7 @@ public class JdkZlibDecoder extends ZlibDecoder {
             if (!finished) {
                 inflater.reset();
                 crc.reset();
+                xlen = -1;
                 gzipState = GzipState.HEADER_START;
                 return true;
             }
@@ -360,7 +419,11 @@ public class JdkZlibDecoder extends ZlibDecoder {
                     crc.update(xlen1);
                     crc.update(xlen2);
 
-                    xlen |= xlen1 << 8 | xlen2;
+                    // XLEN is a little-endian unsigned 16-bit value (RFC 1952), so xlen1 is the
+                    // low byte and xlen2 the high byte. This must be an assignment, not |=: xlen
+                    // starts at the -1 "no extra field" sentinel, and OR-ing into -1 (0xFFFFFFFF)
+                    // would leave it -1, so the extra field was never skipped.
+                    xlen = xlen2 << 8 | xlen1;
                 }
                 gzipState = GzipState.XLEN_READ;
                 // fall through
@@ -507,5 +570,16 @@ public class JdkZlibDecoder extends ZlibDecoder {
     private static boolean looksLikeZlib(short cmf_flg) {
         return (cmf_flg & 0x7800) == 0x7800 &&
                 cmf_flg % 31 == 0;
+    }
+
+    @Override
+    public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
+        // Discard bytes of the cumulation buffer if needed.
+        discardSomeReadBytes();
+
+        if (needsRead && !ctx.channel().config().isAutoRead()) {
+            ctx.read();
+        }
+        ctx.fireChannelReadComplete();
     }
 }

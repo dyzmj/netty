@@ -24,12 +24,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.not;
-import static org.hamcrest.CoreMatchers.nullValue;
-import static org.hamcrest.CoreMatchers.sameInstance;
-import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class GlobalEventExecutorTest {
 
@@ -55,21 +54,21 @@ public class GlobalEventExecutorTest {
 
         // Ensure the new thread has started.
         Thread thread = e.thread;
-        assertThat(thread, is(not(nullValue())));
-        assertThat(thread.isAlive(), is(true));
+        assertNotNull(thread);
+        assertTrue(thread.isAlive());
 
         thread.join();
-        assertThat(task.ran.get(), is(true));
+        assertTrue(task.ran.get());
 
         // Ensure another new thread starts again.
         task.ran.set(false);
         e.execute(task);
-        assertThat(e.thread, not(sameInstance(thread)));
+        assertNotSame(e.thread, thread);
         thread = e.thread;
 
         thread.join();
 
-        assertThat(task.ran.get(), is(true));
+        assertTrue(task.ran.get());
     }
 
     @Test
@@ -78,12 +77,12 @@ public class GlobalEventExecutorTest {
         TestRunnable task = new TestRunnable(0);
         ScheduledFuture<?> f = e.schedule(task, 1500, TimeUnit.MILLISECONDS);
         f.sync();
-        assertThat(task.ran.get(), is(true));
+        assertTrue(task.ran.get());
 
         // Ensure the thread is still running.
         Thread thread = e.thread;
-        assertThat(thread, is(not(nullValue())));
-        assertThat(thread.isAlive(), is(true));
+        assertNotNull(thread);
+        assertTrue(thread.isAlive());
 
         thread.join();
     }
@@ -129,9 +128,9 @@ public class GlobalEventExecutorTest {
 
         f.sync();
 
-        assertThat(beforeTask.ran.get(), is(true));
-        assertThat(scheduledTask.ran.get(), is(true));
-        assertThat(afterTask.ran.get(), is(true));
+        assertTrue(beforeTask.ran.get());
+        assertTrue(scheduledTask.ran.get());
+        assertTrue(afterTask.ran.get());
     }
 
     @Test
@@ -155,7 +154,27 @@ public class GlobalEventExecutorTest {
 
         f.sync();
 
-        assertThat(t.ran.get(), is(true));
+        assertTrue(t.ran.get());
+    }
+
+    @Test
+    public void testTerminationFutureFailureDoesNotFillInStackTrace() {
+        // The GlobalEventExecutor.INSTANCE is a singleton that lives for the lifetime of the Classloader that
+        // loaded it. It holds on to the failure of its terminationFuture forever, so that failure must not
+        // populate a (native) backtrace: doing so would pin the Classloader of whatever thread happened to
+        // trigger the lazy initialization of INSTANCE (see https://github.com/netty/netty/issues/17128).
+        Throwable cause = e.terminationFuture().cause();
+        assertNotNull(cause);
+        assertTrue(cause instanceof UnsupportedOperationException);
+
+        StackTraceElement[] before = cause.getStackTrace();
+        assertEquals(1, before.length);
+        assertEquals(GlobalEventExecutor.class.getName(), before[0].getClassName());
+        assertEquals("terminationFuture", before[0].getMethodName());
+
+        // fillInStackTrace() must be a no-op; otherwise it would repopulate the backtrace with native frames.
+        cause.fillInStackTrace();
+        assertArrayEquals(before, cause.getStackTrace());
     }
 
     private static final class TestRunnable implements Runnable {

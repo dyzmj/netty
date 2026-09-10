@@ -18,12 +18,10 @@ package io.netty.handler.codec.http2;
 
 import io.netty.handler.codec.http.HttpScheme;
 import io.netty.handler.codec.http2.Http2HeadersEncoder.SensitivityDetector;
-import io.netty.util.internal.UnstableApi;
 
 /**
  * Builder which builds {@link HttpToHttp2ConnectionHandler} objects.
  */
-@UnstableApi
 public final class HttpToHttp2ConnectionHandlerBuilder extends
         AbstractHttp2ConnectionHandlerBuilder<HttpToHttp2ConnectionHandler, HttpToHttp2ConnectionHandlerBuilder> {
 
@@ -32,6 +30,11 @@ public final class HttpToHttp2ConnectionHandlerBuilder extends
     @Override
     public HttpToHttp2ConnectionHandlerBuilder validateHeaders(boolean validateHeaders) {
         return super.validateHeaders(validateHeaders);
+    }
+
+    @Override
+    public HttpToHttp2ConnectionHandlerBuilder validateRequiredPseudoHeaders(boolean validateRequiredPseudoHeaders) {
+        return super.validateRequiredPseudoHeaders(validateRequiredPseudoHeaders);
     }
 
     @Override
@@ -83,6 +86,30 @@ public final class HttpToHttp2ConnectionHandlerBuilder extends
     }
 
     @Override
+    public HttpToHttp2ConnectionHandlerBuilder encoderIgnoreMaxHeaderListSize(
+            boolean encoderIgnoreMaxHeaderListSize) {
+        return super.encoderIgnoreMaxHeaderListSize(encoderIgnoreMaxHeaderListSize);
+    }
+
+    @Override
+    public HttpToHttp2ConnectionHandlerBuilder decoderEnforceMaxConsecutiveEmptyDataFrames(
+            int maxConsecutiveEmptyFrames) {
+        return super.decoderEnforceMaxConsecutiveEmptyDataFrames(maxConsecutiveEmptyFrames);
+    }
+
+    @Override
+    public HttpToHttp2ConnectionHandlerBuilder decoderEnforceMaxRstFramesPerWindow(int maxRstFramesPerWindow,
+            int secondsPerWindow) {
+        return super.decoderEnforceMaxRstFramesPerWindow(maxRstFramesPerWindow, secondsPerWindow);
+    }
+
+    @Override
+    public HttpToHttp2ConnectionHandlerBuilder encoderEnforceMaxRstFramesPerWindow(int maxRstFramesPerWindow,
+            int secondsPerWindow) {
+        return super.encoderEnforceMaxRstFramesPerWindow(maxRstFramesPerWindow, secondsPerWindow);
+    }
+
+    @Override
     @Deprecated
     public HttpToHttp2ConnectionHandlerBuilder initialHuffmanDecodeCapacity(int initialHuffmanDecodeCapacity) {
         return super.initialHuffmanDecodeCapacity(initialHuffmanDecodeCapacity);
@@ -91,6 +118,11 @@ public final class HttpToHttp2ConnectionHandlerBuilder extends
     @Override
     public HttpToHttp2ConnectionHandlerBuilder decoupleCloseAndGoAway(boolean decoupleCloseAndGoAway) {
         return super.decoupleCloseAndGoAway(decoupleCloseAndGoAway);
+    }
+
+    @Override
+    public HttpToHttp2ConnectionHandlerBuilder flushPreface(boolean flushPreface) {
+        return super.flushPreface(flushPreface);
     }
 
     /**
@@ -113,6 +145,6 @@ public final class HttpToHttp2ConnectionHandlerBuilder extends
     protected HttpToHttp2ConnectionHandler build(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder,
                                                  Http2Settings initialSettings) {
         return new HttpToHttp2ConnectionHandler(decoder, encoder, initialSettings, isValidateHeaders(),
-                decoupleCloseAndGoAway(), httpScheme);
+                decoupleCloseAndGoAway(), flushPreface(), httpScheme);
     }
 }

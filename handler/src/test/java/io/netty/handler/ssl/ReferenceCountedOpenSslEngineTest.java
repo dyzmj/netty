@@ -59,6 +59,13 @@ public class ReferenceCountedOpenSslEngineTest extends OpenSslEngineTest {
         ReferenceCountUtil.release(unwrapEngine(engine));
     }
 
+    // OPENSSL_REFCNT has no finalizer, so the superclass's OPENSSL-only reclaim test does not apply here.
+    // Overriding it without @Test disables it for this subclass.
+    @Override
+    public void leakedEngineIsReclaimedWhileContextAlive() {
+        // noop
+    }
+
     @MethodSource("newTestParams")
     @ParameterizedTest
     public void testNotLeakOnException(SSLEngineTestParam param) throws Exception {
@@ -77,17 +84,9 @@ public class ReferenceCountedOpenSslEngineTest extends OpenSslEngineTest {
         });
     }
 
-    @SuppressWarnings("deprecation")
     @Override
     protected SslContext wrapContext(SSLEngineTestParam param, SslContext context) {
-        if (context instanceof ReferenceCountedOpenSslContext) {
-            if (param instanceof OpenSslEngineTestParam) {
-                ((ReferenceCountedOpenSslContext) context).setUseTasks(((OpenSslEngineTestParam) param).useTasks);
-            }
-            // Explicit enable the session cache as its disabled by default on the client side.
-            ((ReferenceCountedOpenSslContext) context).sessionContext().setSessionCacheEnabled(true);
-        }
-        return context;
+        return OpenSslEngineTestParam.wrapContext(param, context);
     }
 
     @MethodSource("newTestParams")

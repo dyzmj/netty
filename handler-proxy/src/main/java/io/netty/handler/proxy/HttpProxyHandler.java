@@ -29,6 +29,8 @@ import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.DefaultHttpHeadersFactory;
+import io.netty.handler.codec.http.HttpHeadersFactory;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -42,6 +44,15 @@ import io.netty.util.internal.ObjectUtil;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 
+/**
+ * Handler that establishes a blind forwarding proxy tunnel using
+ * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-4.3.6">HTTP/1.1 CONNECT</a> request. It can be used to
+ * establish plaintext or secure tunnels.
+ * <p>
+ * HTTP users who need to connect to a
+ * <a href="https://datatracker.ietf.org/doc/html/rfc7230#page-10">message-forwarding HTTP proxy agent</a> instead of a
+ * tunneling proxy should not use this handler.
+ */
 public final class HttpProxyHandler extends ProxyHandler {
 
     private static final String PROTOCOL = "http";
@@ -59,6 +70,7 @@ public final class HttpProxyHandler extends ProxyHandler {
     private final CharSequence authorization;
     private final HttpHeaders outboundHeaders;
     private final boolean ignoreDefaultPortsInConnectHostHeader;
+    private final boolean validateInitialHeaders;
     private HttpResponseStatus status;
     private HttpHeaders inboundHeaders;
 
@@ -73,12 +85,20 @@ public final class HttpProxyHandler extends ProxyHandler {
     public HttpProxyHandler(SocketAddress proxyAddress,
                             HttpHeaders headers,
                             boolean ignoreDefaultPortsInConnectHostHeader) {
+        this(proxyAddress, headers, ignoreDefaultPortsInConnectHostHeader, true);
+    }
+
+    public HttpProxyHandler(SocketAddress proxyAddress,
+                            HttpHeaders headers,
+                            boolean ignoreDefaultPortsInConnectHostHeader,
+                            boolean validateInitialHeaders) {
         super(proxyAddress);
         username = null;
         password = null;
         authorization = null;
         this.outboundHeaders = headers;
         this.ignoreDefaultPortsInConnectHostHeader = ignoreDefaultPortsInConnectHostHeader;
+        this.validateInitialHeaders = validateInitialHeaders;
     }
 
     public HttpProxyHandler(SocketAddress proxyAddress, String username, String password) {
@@ -87,7 +107,7 @@ public final class HttpProxyHandler extends ProxyHandler {
 
     public HttpProxyHandler(SocketAddress proxyAddress, String username, String password,
                             HttpHeaders headers) {
-        this(proxyAddress, username, password, headers, false);
+        this(proxyAddress, username, password, headers, false, true);
     }
 
     public HttpProxyHandler(SocketAddress proxyAddress,
@@ -95,6 +115,15 @@ public final class HttpProxyHandler extends ProxyHandler {
                             String password,
                             HttpHeaders headers,
                             boolean ignoreDefaultPortsInConnectHostHeader) {
+        this(proxyAddress, username, password, headers, ignoreDefaultPortsInConnectHostHeader, true);
+    }
+
+    public HttpProxyHandler(SocketAddress proxyAddress,
+                            String username,
+                            String password,
+                            HttpHeaders headers,
+                            boolean ignoreDefaultPortsInConnectHostHeader,
+                            boolean validateInitialHeaders) {
         super(proxyAddress);
         this.username = ObjectUtil.checkNotNull(username, "username");
         this.password = ObjectUtil.checkNotNull(password, "password");
@@ -114,6 +143,7 @@ public final class HttpProxyHandler extends ProxyHandler {
 
         this.outboundHeaders = headers;
         this.ignoreDefaultPortsInConnectHostHeader = ignoreDefaultPortsInConnectHostHeader;
+        this.validateInitialHeaders = validateInitialHeaders;
     }
 
     @Override
@@ -162,10 +192,12 @@ public final class HttpProxyHandler extends ProxyHandler {
                 hostString :
                 url;
 
+        HttpHeadersFactory headersFactory = DefaultHttpHeadersFactory.headersFactory()
+                .withValidation(validateInitialHeaders);
         FullHttpRequest req = new DefaultFullHttpRequest(
                 HttpVersion.HTTP_1_1, HttpMethod.CONNECT,
                 url,
-                Unpooled.EMPTY_BUFFER, false);
+                Unpooled.EMPTY_BUFFER, headersFactory, headersFactory);
 
         req.headers().set(HttpHeaderNames.HOST, hostHeader);
 

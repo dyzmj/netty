@@ -18,6 +18,7 @@ package io.netty.buffer;
 import io.netty.microbench.util.AbstractMicrobenchmark;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.CompilerControl;
 import org.openjdk.jmh.annotations.GroupThreads;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
@@ -33,7 +34,14 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class AbstractReferenceCountedByteBufBenchmark extends AbstractMicrobenchmark {
 
-    @Param({ "1", "10", "100", "1000", "10000" })
+    @Param({
+            "0",
+            "1",
+            "10",
+            "100",
+            "1000",
+            "10000",
+    })
     public int delay;
 
     AbstractReferenceCountedByteBuf buf;
@@ -53,8 +61,25 @@ public class AbstractReferenceCountedByteBufBenchmark extends AbstractMicrobench
     @OutputTimeUnit(TimeUnit.NANOSECONDS)
     public boolean retainReleaseUncontended() {
         buf.retain();
-        Blackhole.consumeCPU(delay);
+        delay();
         return buf.release();
+    }
+
+    private void delay() {
+        if (delay > 0) {
+            Blackhole.consumeCPU(delay);
+        }
+    }
+
+    @Benchmark
+    @BenchmarkMode(Mode.AverageTime)
+    @OutputTimeUnit(TimeUnit.NANOSECONDS)
+    @CompilerControl(CompilerControl.Mode.DONT_INLINE)
+    public boolean createUseAndRelease(Blackhole useBuffer) {
+        ByteBuf unpooled = Unpooled.buffer(1);
+        useBuffer.consume(unpooled);
+        delay();
+        return unpooled.release();
     }
 
     @Benchmark
@@ -63,7 +88,7 @@ public class AbstractReferenceCountedByteBufBenchmark extends AbstractMicrobench
     @GroupThreads(4)
     public boolean retainReleaseContended() {
         buf.retain();
-        Blackhole.consumeCPU(delay);
+        delay();
         return buf.release();
     }
 }

@@ -27,12 +27,22 @@ final class Java7SslParametersUtils {
     }
 
     /**
-     * Utility method that is used by {@link OpenSslEngine} and so allow use not not have any reference to
+     * Utility method that is used by {@link OpenSslEngine} and so allow use not have any reference to
      * {@link AlgorithmConstraints} in the code. This helps us to not get into trouble when using it in java
      * version < 7 and especially when using on android.
      */
     @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     static void setAlgorithmConstraints(SSLParameters sslParameters, Object algorithmConstraints) {
         sslParameters.setAlgorithmConstraints((AlgorithmConstraints) algorithmConstraints);
+    }
+
+    /**
+     * Utility method for calling the {@code setEndpointIdentitificationAlgorithm} method,
+     * which was introduced in Java 7.
+     */
+    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
+    static void setEndpointIdentificationAlgorithm(
+            SSLParameters sslParameters, String endpointIdentificationAlgorithm) {
+        sslParameters.setEndpointIdentificationAlgorithm(endpointIdentificationAlgorithm);
     }
 }

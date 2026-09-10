@@ -15,17 +15,27 @@
  */
 package io.netty.testsuite.transport.socket;
 
+import io.netty.channel.socket.DatagramChannel;
+import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.util.NetUtil;
+import io.netty.util.internal.PlatformDependent;
 
+import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.net.UnknownHostException;
 
 public class DatagramUnicastIPv6MappedTest extends DatagramUnicastIPv6Test {
 
     @Override
     protected SocketAddress newSocketAddress() {
-        return new InetSocketAddress(0);
+        // Explicit use IPv4 wildcard for bind while the channel is using SocketProtocolFamily.INET6.
+        try {
+            return new InetSocketAddress(InetAddress.getByAddress(new byte[] {0, 0 , 0, 0}), 0);
+        } catch (UnknownHostException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Override
@@ -35,5 +45,14 @@ public class DatagramUnicastIPv6MappedTest extends DatagramUnicastIPv6Test {
             return new InetSocketAddress(NetUtil.LOCALHOST4, serverAddress.getPort());
         }
         return serverAddress;
+    }
+
+    @Override
+    protected boolean disconnectMightFail(DatagramChannel channel) {
+        // See https://bugs.openjdk.org/browse/JDK-8285515
+        if (channel instanceof NioDatagramChannel && PlatformDependent.javaVersion() < 20) {
+            return true;
+        }
+        return super.disconnectMightFail(channel);
     }
 }
